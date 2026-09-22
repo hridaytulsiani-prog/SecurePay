@@ -30,12 +30,12 @@
 import secrets
 from hashlib import sha512
 
-from django_redis import get_redis_connection
+from django.core.cache import cache
 
 from payments.models.merchantinfo import MerchantInfo
 
 
-TOKEN_TTL_SECONDS = 300  # 5 minutes — short on purpose; see _verify_session_token_and_refresh
+TOKEN_TTL_SECONDS = 10 * 60  # 10 minutes; keep in sync with the merchant client's idle timeout.
 
 
 def _normalize_session_token(merchant_id, auth_token):
@@ -82,11 +82,9 @@ def _verify_session_token_and_refresh(merchant_id, auth_token):
     handles the actual expiry — nothing here runs a cleanup job)."""
     redis_key = f"merchant_{merchant_id}:{auth_token}"
     try:
-        redis_conn = get_redis_connection("default")
-        exists = redis_conn.exists(redis_key)
-        if not exists:
+        if cache.get(redis_key) is None:
             return False
-        redis_conn.expire(redis_key, TOKEN_TTL_SECONDS)
+        cache.touch(redis_key, TOKEN_TTL_SECONDS)
         return True
     except Exception:
         # Redis unreachable -> fail closed (treat as "not authenticated")

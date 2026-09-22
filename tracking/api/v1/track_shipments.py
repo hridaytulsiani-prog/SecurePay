@@ -27,20 +27,37 @@
 # data-integrity nuisance.
 import io
 import csv
+from datetime import datetime
 
 from django.conf import settings
 from django.http import JsonResponse
+from django.utils import timezone
 from django.views import View
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 from tracking.models.trackinginfo import Shipment
 from tracking.signing import build_enquiry_link
 from tracking.api.v1.notifs import send_whatsapp_text
 from tracking.api.v1.message_templates import delivery_enquiry_message
+from tracking.api.v1.delhivery_public_tracking import (
+    refresh_delhivery_public_snapshot,
+    serialize_delhivery_public_snapshot,
+)
+from tracking.api.v1.trackparcel import get_or_create_snapshot, parse_date_value, refresh_trackparcel_snapshot
 from payments.models import OrderInfo
+from payments.auth import get_merchant_id_from_token
 import json
 import logging
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _get_auth_token_from_request(request):
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return request.GET.get("auth_token")
 
 
 def notify_customer_delivered(pa_order_id):
@@ -69,6 +86,7 @@ def notify_customer_delivered(pa_order_id):
         logger.exception("Failed to send delivery WhatsApp notification for order %s", pa_order_id)
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class CreateShipment(View):
     """Create one shipment and link it back onto its OrderInfo row, then
     forward it to ShipSagar (push_to_shipsagar) so the courier knows about it."""
@@ -79,22 +97,39 @@ class CreateShipment(View):
         # merchant is calling, so `secureupi_order_id` is trusted at face
         # value; a caller could attach a new Shipment to ANY merchant's
         # order, not just their own.
+        auth_token = _get_auth_token_from_request(request)
+        token_merchant_id = get_merchant_id_from_token(auth_token)
+        if token_merchant_id is None:
+            return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
+
         request_data = json.loads(request.body.decode('utf-8'))
         try:
-            shipment = Shipment.objects.create(
-                courier=request_data.get('courier'),
-                awb=request_data.get('awb'),
-                pa_order_id=request_data.get('secureupi_order_id')
-            )
+            order_info = OrderInfo.objects.filter(
+                pa_order_id=request_data.get('secureupi_order_id'),
+                merchant_id=token_merchant_id,
+            ).first()
+            if not order_info:
+                return JsonResponse({'error': 'Order not found'}, status=404)
+
+            shipment_data = {
+                'courier': request_data.get('courier'),
+                'pa_order_id': request_data.get('secureupi_order_id'),
+            }
+            if request_data.get('awb'):
+                shipment_data['awb'] = request_data.get('awb')
+
+            shipment = Shipment.objects.create(**shipment_data)
             # If no OrderInfo matches this pa_order_id, order_info is None
             # and the next line raises AttributeError — caught by the
             # `except Exception` below and returned as a 400. Not the most
             # descriptive error message for "order not found" specifically,
             # but functionally the request is correctly rejected either way.
-            order_info = OrderInfo.objects.filter(pa_order_id=shipment.pa_order_id).first()
             order_info.shipment_id = shipment
             order_info.save()
-            push_to_shipsagar(request_data.get('awb'), request_data.get('courier'), order_info.pa_order_id, order_info.customer_info.customer_name, order_info.customer_info.customer_email, order_info.customer_info.customer_phone)
+            # ShipSagar integration is preserved below, but TrackParcel is the
+            # active provider for testing because billing is per API call.
+            # push_to_shipsagar(shipment.awb, request_data.get('courier'), order_info.pa_order_id, order_info.customer_info.customer_name, order_info.customer_info.customer_email, order_info.customer_info.customer_phone)
+            get_or_create_snapshot(shipment)
             print(f"Shipment created with AWB: {shipment.awb}, Courier: {shipment.courier}, PA Order ID: {shipment.pa_order_id}")
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=400)
@@ -206,6 +241,7 @@ class UpdateShipment(View):
 
         return JsonResponse({"ok": True, "awb": awb, "status": "DELIVERED"})
 
+@method_decorator(csrf_exempt, name="dispatch")
 class CreateBulkShipment(View):
     """CSV upload version of CreateShipment — one row per shipment, reported
     back per-row as success/failure rather than failing the whole batch."""
@@ -221,6 +257,11 @@ class CreateBulkShipment(View):
         columns: secureupi_order_id, awb, courier.
         Body: JSON array of shipments, each with 'courier', 'awb', 'secureupi_order_id'
         """
+        auth_token = _get_auth_token_from_request(request)
+        token_merchant_id = get_merchant_id_from_token(auth_token)
+        if token_merchant_id is None:
+            return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
+
         uploaded_file = request.FILES.get("file")
 
         if not uploaded_file:
@@ -383,22 +424,40 @@ class CreateBulkShipment(View):
             # ----------------------------------------------
 
             try:
+                order_info = OrderInfo.objects.filter(
+                    pa_order_id=order_id,
+                    merchant_id=token_merchant_id,
+                ).first()
+                if not order_info:
+                    results.append({
+                        "row": row_number,
+                        "secureupi_order_id": order_id,
+                        "success": False,
+                        "error": "Order not found"
+                    })
+                    failed_count += 1
+                    continue
 
-                result = Shipment.objects.create(
-                    courier=courier,
-                    awb=awb,
-                    pa_order_id=order_id
-                )
-                order_info = OrderInfo.objects.filter(pa_order_id=result.pa_order_id).first()
+                shipment_data = {
+                    "courier": courier,
+                    "pa_order_id": order_id
+                }
+                if awb:
+                    shipment_data["awb"] = awb
+
+                result = Shipment.objects.create(**shipment_data)
                 order_info.shipment_id = result
                 order_info.save()
                 print(f"Shipment created with AWB: {result.awb}, Courier: {result.courier}, PA Order ID: {result.pa_order_id}")
-                push_to_shipsagar(awb, courier, order_info.pa_order_id, order_info.customer_info.customer_name, order_info.customer_info.customer_email, order_info.customer_info.customer_phone)
+                # ShipSagar integration is preserved below, but TrackParcel is
+                # the active provider for testing.
+                # push_to_shipsagar(result.awb, courier, order_info.pa_order_id, order_info.customer_info.customer_name, order_info.customer_info.customer_email, order_info.customer_info.customer_phone)
+                get_or_create_snapshot(result)
                 results.append({
                     "row": row_number,
                     "secureupi_order_id": order_id,
                     "success": True,
-                    "awb": awb,
+                    "awb": result.awb,
                     "status": result.status
                 })
 
@@ -564,3 +623,162 @@ class TrackShipmentShipsagar(View):
             })
         else:
             return JsonResponse({"error": "Failed to fetch shipment status from Shipsagar"}, status=response.status_code)
+
+
+class TrackShipmentTrackParcel(View):
+    """Default tracking view for testing TrackParcel without removing ShipSagar."""
+
+    def get(self, request, awb=None):
+        if not awb:
+            awb = request.GET.get("awb")
+        if not awb:
+            return JsonResponse({"error": "AWB is required"}, status=400)
+
+        force = str(request.GET.get("force", "")).lower() in {"1", "true", "yes"}
+        shipment = Shipment.objects.filter(awb=awb).first()
+        if not shipment:
+            return JsonResponse({"error": "Shipment not found in local database"}, status=404)
+
+        try:
+            snapshot, refreshed, reason = refresh_trackparcel_snapshot(shipment, force=force)
+        except RuntimeError as exc:
+            return JsonResponse(
+                {
+                    "error": str(exc),
+                    "provider": "trackparcel",
+                    "hint": "Set TRACKPARCEL_API_KEY and confirm TRACKPARCEL_BASE_URL/TRACKPARCEL_TRACK_ENDPOINT.",
+                },
+                status=400,
+            )
+        except requests.RequestException as exc:
+            return JsonResponse(
+                {
+                    "error": "Failed to fetch shipment status from TrackParcel",
+                    "details": str(exc),
+                    "provider": "trackparcel",
+                },
+                status=502,
+            )
+
+        return JsonResponse(
+            status=200,
+            data={
+                "awb": shipment.awb,
+                "secureupi_order_id": shipment.pa_order_id,
+                "courier": shipment.courier,
+                "status": snapshot.current_status or shipment.status,
+                "normalized_status": snapshot.normalized_status,
+                "history": shipment.history if hasattr(shipment, "history") else [],
+                "provider": "trackparcel",
+                "refreshed": refreshed,
+                "refresh_reason": reason,
+                "last_checked_at": snapshot.last_checked_at.isoformat() if snapshot.last_checked_at else None,
+                "next_check_after": snapshot.next_check_after.isoformat() if snapshot.next_check_after else None,
+                "expected_delivery_date": snapshot.expected_delivery_date.isoformat() if snapshot.expected_delivery_date else None,
+                "delivered_at": snapshot.delivered_at.isoformat() if snapshot.delivered_at else None,
+                "tracking": snapshot.raw_response,
+                "created_at": shipment.created_at.isoformat() if hasattr(shipment, "created_at") else None,
+            },
+        )
+
+
+class TrackShipmentDelhiveryPublic(View):
+    """Temporary provider for testing cache/freshness logic without TrackParcel key."""
+
+    def get(self, request, awb=None):
+        if not awb:
+            awb = request.GET.get("awb")
+        if not awb:
+            return JsonResponse({"error": "AWB is required"}, status=400)
+
+        force = str(request.GET.get("force", "")).lower() in {"1", "true", "yes"}
+        shipment = Shipment.objects.filter(awb=awb).first()
+        if not shipment:
+            return JsonResponse({"error": "Shipment not found in local database"}, status=404)
+
+        try:
+            snapshot, refreshed, reason = refresh_delhivery_public_snapshot(shipment, force=force)
+        except requests.RequestException as exc:
+            return JsonResponse(
+                {
+                    "error": "Failed to fetch shipment status from Delhivery public tracking",
+                    "details": str(exc),
+                    "provider": "delhivery_public",
+                },
+                status=502,
+            )
+
+        return JsonResponse(
+            status=200,
+            data=serialize_delhivery_public_snapshot(shipment, snapshot, refreshed, reason),
+        )
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class TrackingSnapshotTestSetup(View):
+    """Local test helper for simulating EDD/window freshness behavior."""
+
+    def post(self, request, awb=None):
+        if not settings.DEBUG:
+            return JsonResponse({"error": "Test setup is available only when DEBUG=True"}, status=404)
+
+        if not awb:
+            awb = request.GET.get("awb")
+        if not awb:
+            return JsonResponse({"error": "AWB is required"}, status=400)
+
+        try:
+            payload = json.loads(request.body.decode("utf-8") or "{}")
+        except ValueError:
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        shipment = Shipment.objects.filter(awb=awb).first()
+        if not shipment:
+            return JsonResponse({"error": "Shipment not found in local database"}, status=404)
+
+        snapshot = get_or_create_snapshot(shipment)
+        expected_delivery_date = parse_date_value(payload.get("expected_delivery_date"))
+        if expected_delivery_date:
+            snapshot.expected_delivery_date = expected_delivery_date
+
+        if "last_checked_at" in payload:
+            snapshot.last_checked_at = _parse_test_datetime(payload.get("last_checked_at"))
+
+        if "next_check_after" in payload:
+            snapshot.next_check_after = _parse_test_datetime(payload.get("next_check_after"))
+        elif payload.get("clear_next_check_after", True):
+            snapshot.next_check_after = None
+
+        if payload.get("status"):
+            snapshot.current_status = str(payload.get("status"))
+            snapshot.normalized_status = str(payload.get("normalized_status") or payload.get("status")).upper()
+            shipment.status = str(payload.get("status"))
+            shipment.save(update_fields=["status"])
+
+        snapshot.updated_at = timezone.now()
+        snapshot.save()
+
+        return JsonResponse(
+            {
+                "ok": True,
+                "awb": shipment.awb,
+                "expected_delivery_date": snapshot.expected_delivery_date.isoformat()
+                if snapshot.expected_delivery_date
+                else None,
+                "last_checked_at": snapshot.last_checked_at.isoformat() if snapshot.last_checked_at else None,
+                "next_check_after": snapshot.next_check_after.isoformat() if snapshot.next_check_after else None,
+                "status": snapshot.current_status,
+                "normalized_status": snapshot.normalized_status,
+            }
+        )
+
+
+def _parse_test_datetime(value):
+    if not value:
+        return None
+    if value == "now":
+        return timezone.now()
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed

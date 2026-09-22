@@ -31,6 +31,7 @@ _KNOWN_CARRIERS = [
 
 # Service tier that often trails the carrier name ("Blue Dart Air").
 _SERVICE_TIERS = ("Surface", "Air", "Express", "Standard", "Priority")
+_GENERIC_COURIER_VALUES = {"document", "label", "shipment", "shipping", "courierlabel"}
 
 
 def _first(patterns: list[str], text: str) -> Optional[str]:
@@ -46,8 +47,10 @@ def _first(patterns: list[str], text: str) -> Optional[str]:
 def extract_awb(text: str, barcode_values: list[str]) -> Optional[str]:
     """The AWB from an explicit label, else the longest decoded barcode."""
     awb = _first(
-        [r"AWB\s*#?\s*:?\s*([A-Za-z0-9]+)",
-         r"(?:Tracking|Waybill)\s*(?:No\.?|Number)?\s*#?\s*:?\s*([A-Za-z0-9]+)"],
+        [
+            r"AWB\s*(?:No\.?|Number|#)?\s*:?\s*([A-Za-z0-9][A-Za-z0-9-]{5,})",
+            r"(?:Tracking|Waybill)\s*(?:No\.?|Number)?\s*#?\s*:?\s*([A-Za-z0-9][A-Za-z0-9-]{5,})",
+        ],
         text,
     )
     if awb:
@@ -60,7 +63,7 @@ def extract_awb(text: str, barcode_values: list[str]) -> Optional[str]:
 def extract_delivery_partner(text: str) -> Optional[str]:
     """The carrier, from a 'Courier:' label / line above AWB / known-carrier scan."""
     partner = _first([r"Courier\s*:?\s*([A-Za-z][A-Za-z .&']+)"], text)
-    if partner:
+    if partner and _normalise_name(partner) not in _GENERIC_COURIER_VALUES:
         return partner.strip()
 
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -76,3 +79,7 @@ def extract_delivery_partner(text: str) -> Optional[str]:
         if m:
             return m.group(0).strip()
     return None
+
+
+def _normalise_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())

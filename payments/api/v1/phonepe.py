@@ -221,6 +221,8 @@ class PhonePeInitiateView(APIView):
         mobile = data.get("mobileNumber")
         customer_name = (data.get("customerName") or "").strip()
         customer_email = (data.get("customerEmail") or "").strip()
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        customer_address = (data.get("customerAddress") or metadata.get("address") or "Not provided").strip()
 
         if not merchant_order_id:
             return Response({"ok": False, "error": "merchantOrderId is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -250,6 +252,7 @@ class PhonePeInitiateView(APIView):
                 defaults={
                     "customer_name": customer_name or "Guest",
                     "customer_email": customer_email,
+                    "customer_address": customer_address,
                 },
             )
         else:
@@ -263,6 +266,7 @@ class PhonePeInitiateView(APIView):
                 customer_phone=f"TEMP-{merchant_order_id}"[:50],
                 customer_name=customer_name or "Guest",
                 customer_email=customer_email,
+                customer_address=customer_address,
             )
 
         amount_rupees = Decimal(amount_paise) / Decimal("100")
