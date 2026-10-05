@@ -394,10 +394,25 @@ class PDFValidator(APIView):
                 os.remove(temp_path)
             return Response({"error": "This PDF could not be read as a supported shipment label."}, status=422)
 
+        # The merchant order ID is supplied by the upload form because many
+        # courier labels, especially Delhivery labels, expose the AWB as their
+        # first barcode rather than the merchant's order reference. Prefer the
+        # merchant-supplied value when it belongs to this merchant; otherwise
+        # retain the existing courier-specific PDF extraction fallback.
+        submitted_order_id = str(request.data.get("secureupi_order_id") or "").strip()
+        if submitted_order_id:
+            submitted_order = OrderInfo.objects.filter(merchant_id=merchant_id).filter(
+                Q(merchant_order_id__iexact=submitted_order_id)
+                | Q(pa_order_id__iexact=submitted_order_id)
+            ).first()
+            if submitted_order:
+                parsed_order_id = submitted_order.merchant_order_id
+
         order_exists = False
         if parsed_order_id:
             order_exists = OrderInfo.objects.filter(merchant_id=merchant_id).filter(
-                Q(merchant_order_id=parsed_order_id) | Q(pa_order_id=parsed_order_id)
+                Q(merchant_order_id__iexact=parsed_order_id)
+                | Q(pa_order_id__iexact=parsed_order_id)
             ).exists()
 
         if not order_exists:
@@ -413,12 +428,13 @@ class PDFValidator(APIView):
             file_name=pdf_file.name,
             status="processing",
             verdict="CHECKING",
+            order_id=parsed_order_id,
             details={"processing": True},
         )
 
         threading.Thread(
             target=self._process_pdf_record,
-            args=(record.id, temp_path, merchant_id),
+            args=(record.id, temp_path, merchant_id, parsed_order_id),
             daemon=True,
         ).start()
 
@@ -427,7 +443,13 @@ class PDFValidator(APIView):
             "upload_record": self._serialize_record(record),
         }, status=202)
 
-    def _process_pdf_record(self, record_id: int, temp_path: str, merchant_id: int):
+    def _process_pdf_record(
+        self,
+        record_id: int,
+        temp_path: str,
+        merchant_id: int,
+        submitted_order_id: Optional[str] = None,
+    ):
         try:
             result = validate_label(temp_path)
             logger.info("Label validation result: %s", result)
@@ -456,7 +478,12 @@ class PDFValidator(APIView):
                     },
                 )
                 return
-            order_id = self.get_order_id(delivery_partner, result.raw_text, result.barcodes, courier_partner)
+            order_id = submitted_order_id or self.get_order_id(
+                delivery_partner,
+                result.raw_text,
+                result.barcodes,
+                courier_partner,
+            )
 
             analysis = analyze_shipping_label_pdf(
                 temp_path,
@@ -478,7 +505,7 @@ class PDFValidator(APIView):
 
             if order_id and shipment:
                 order = OrderInfo.objects.filter(merchant_id=merchant_id).filter(
-                    Q(merchant_order_id=order_id) | Q(pa_order_id=order_id)
+                    Q(merchant_order_id__iexact=order_id) | Q(pa_order_id__iexact=order_id)
                 ).first()
                 if order:
                     order.shipment_id = shipment
@@ -695,6 +722,18 @@ class PDFValidator(APIView):
                     return match.group(1)
 
         if "Delhivery" in delivery_partner:
+            # Delhivery prints the merchant reference as visible text in
+            # formats such as "ORDER # : abc123". This must be preferred over
+            # the first barcode, which is normally the AWB.
+            order_patterns = [
+                r"\bOrder\s*(?:#|No\.?|ID|Number)\s*[:#]?\s*([A-Za-z0-9][A-Za-z0-9_-]{1,63})\b",
+                r"\bOrder\s*[:#]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,63})\b",
+            ]
+            for pattern in order_patterns:
+                match = re.search(pattern, raw_text or "", re.IGNORECASE)
+                if match:
+                    return match.group(1)
+
             # When the courier was identified via color rather than logo/text
             # (self.from_color), the first barcode tends to be a different
             # value than usual, so the order id is expected to be the second

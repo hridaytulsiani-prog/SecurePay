@@ -1,18 +1,20 @@
 import json
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.db import transaction
 from django.http import HttpResponseBadRequest, JsonResponse
 from django.utils import timezone
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
-from payments.models import CheckoutSession, MerchantInfo
+from payments.models import CheckoutSession, CustomerInfo, MerchantInfo, OrderInfo
 from payments.api.v1.generate_order import _get_auth_token_from_request
 from payments.auth import get_merchant_id_from_token
 
 
-CHECKOUT_SESSION_TTL_SECONDS = 5 * 60
+CHECKOUT_SESSION_TTL_SECONDS = 10 * 60
 
 
 def _client_ip(request):
@@ -44,6 +46,62 @@ def _expire_stale_session(session):
     if session and session.status == CheckoutSession.STATUS_CREATED:
         session.status = "expired"
         session.save(update_fields=["status", "updated_at"])
+
+
+def _ensure_merchant_order(merchant, customer_snapshot, order_snapshot):
+    """Create the dashboard order as soon as a checkout session is started."""
+    order_id = str(order_snapshot.get("order_id") or "").strip()
+    amount_text = str(order_snapshot.get("amount") or "").strip()
+    customer_phone = str(customer_snapshot.get("phone") or "").strip()
+
+    if not order_id or not amount_text or not customer_phone:
+        raise ValueError("order id, amount, and customer phone are required")
+
+    try:
+        amount = Decimal(amount_text)
+    except (InvalidOperation, ValueError):
+        raise ValueError("amount must be a valid number")
+
+    if amount <= 0:
+        raise ValueError("amount must be greater than zero")
+
+    customer, created = CustomerInfo.objects.get_or_create(
+        customer_phone=customer_phone,
+        defaults={
+            "customer_name": str(customer_snapshot.get("name") or "")[:100],
+            "customer_email": str(customer_snapshot.get("email") or ""),
+            "customer_address": str(customer_snapshot.get("address") or ""),
+        },
+    )
+    if not created:
+        changed_fields = []
+        customer_name = str(customer_snapshot.get("name") or "")[:100]
+        customer_email = str(customer_snapshot.get("email") or "")
+        customer_address = str(customer_snapshot.get("address") or "")
+        if customer_name and customer.customer_name != customer_name:
+            customer.customer_name = customer_name
+            changed_fields.append("customer_name")
+        if customer_email and customer.customer_email != customer_email:
+            customer.customer_email = customer_email
+            changed_fields.append("customer_email")
+        if customer_address and customer.customer_address != customer_address:
+            customer.customer_address = customer_address
+            changed_fields.append("customer_address")
+        if changed_fields:
+            customer.save(update_fields=changed_fields)
+
+    OrderInfo.objects.get_or_create(
+        merchant=merchant,
+        merchant_order_id=order_id,
+        defaults={
+            "order_amount": amount,
+            "order_currency": str(order_snapshot.get("currency") or "INR")[:10].upper(),
+            "order_status": "pending",
+            "payment_state": "CREATED",
+            "customer_info": customer,
+            "payment_provider": "securepay",
+        },
+    )
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -92,6 +150,12 @@ class CheckoutSessionView(View):
         source_origin = str(payload.get("source_origin") or payload.get("sourceOrigin") or "")[:255]
         source_url = str(payload.get("source_url") or payload.get("sourceUrl") or "")
         order_id = str(order_snapshot.get("order_id") or "").strip()
+
+        try:
+            with transaction.atomic():
+                _ensure_merchant_order(merchant, customer_snapshot, order_snapshot)
+        except ValueError as error:
+            return JsonResponse({"ok": False, "error": str(error)}, status=400)
 
         existing_session = None
         if order_id:

@@ -106,6 +106,8 @@ class AdminOrderListView(AdminAPIView):
         status_filter = request.GET.get("status")
         date_from = parse_date(request.GET.get("date_from") or "")
         date_to = parse_date(request.GET.get("date_to") or "")
+        courier_filter = (request.GET.get("courier") or "").strip()
+        delivery_status_filter = (request.GET.get("delivery_status") or "").strip()
         shipment_label_status = (request.GET.get("shipment_label_status") or "").strip().lower()
 
         qs = OrderInfo.objects.select_related(
@@ -120,6 +122,10 @@ class AdminOrderListView(AdminAPIView):
             qs = qs.filter(order_date__date__gte=date_from)
         if date_to:
             qs = qs.filter(order_date__date__lte=date_to)
+        if courier_filter:
+            qs = qs.filter(shipment_id__courier__iexact=courier_filter)
+        if delivery_status_filter:
+            qs = qs.filter(shipment_id__status__iexact=delivery_status_filter)
 
         # .values(...) flattens related fields (merchant__merchant_name, etc.)
         # straight into dicts the frontend can render without extra joins.

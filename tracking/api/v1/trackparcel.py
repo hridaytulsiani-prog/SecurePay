@@ -38,11 +38,23 @@ def should_refresh_snapshot(snapshot, force=False, now=None):
         return False, "final shipment status"
 
     expected_date = snapshot.expected_delivery_date
-    if expected_date:
-        if now.date() < expected_date:
-            return False, "before expected delivery date"
-        if now.date() == expected_date and not _inside_delivery_window(now):
-            return False, "outside delivery window"
+    if expected_date and now.date() == expected_date and not _inside_delivery_window(now):
+        return False, "outside delivery window"
+
+    if expected_date and now.date() < expected_date:
+        last_checked_date = (
+            timezone.localtime(snapshot.last_checked_at).date()
+            if snapshot.last_checked_at
+            else None
+        )
+        if last_checked_date == now.date():
+            return False, "already checked today before delivery date"
+        return True, "daily pre-delivery check due"
+
+    if not expected_date and snapshot.last_checked_at:
+        if timezone.localtime(snapshot.last_checked_at).date() == now.date():
+            return False, "already checked today while delivery date is unknown"
+        return True, "daily tracking check due"
 
     if not snapshot.last_checked_at:
         return True, "never checked"
@@ -97,9 +109,6 @@ def call_trackparcel_api(shipment):
     base_url = getattr(settings, "TRACKPARCEL_BASE_URL", "").rstrip("/")
     api_key = getattr(settings, "TRACKPARCEL_API_KEY", "")
     endpoint = getattr(settings, "TRACKPARCEL_TRACK_ENDPOINT", "/api/v1/track")
-    method = getattr(settings, "TRACKPARCEL_HTTP_METHOD", "POST").upper()
-    auth_header = getattr(settings, "TRACKPARCEL_AUTH_HEADER", "Authorization")
-    auth_scheme = getattr(settings, "TRACKPARCEL_AUTH_SCHEME", "Bearer")
 
     if not base_url:
         raise RuntimeError("TRACKPARCEL_BASE_URL is not configured")
@@ -108,11 +117,10 @@ def call_trackparcel_api(shipment):
 
     url = f"{base_url}{endpoint}"
     payload = build_trackparcel_payload(shipment)
-    headers = {"Accept": "application/json"}
-    if auth_header.lower() == "authorization":
-        headers[auth_header] = f"{auth_scheme} {api_key}".strip()
-    else:
-        headers[auth_header] = api_key
+    headers = {
+        "Accept": "application/json",
+        "x-api-key": api_key,
+    }
 
     call_log = TrackingApiCallLog.objects.create(
         provider=TrackingApiCallLog.PROVIDER_TRACKPARCEL,
@@ -124,11 +132,7 @@ def call_trackparcel_api(shipment):
     )
 
     try:
-        if method == "GET":
-            response = requests.get(url, params=payload, headers=headers, timeout=20)
-        else:
-            headers["Content-Type"] = "application/json"
-            response = requests.post(url, json=payload, headers=headers, timeout=20)
+        response = requests.get(url, params=payload, headers=headers, timeout=20)
 
         response_payload = response.json()
         call_log.http_status = response.status_code
@@ -147,15 +151,22 @@ def call_trackparcel_api(shipment):
 
 
 def build_trackparcel_payload(shipment):
+    courier = str(shipment.courier or '').strip()
+    normalized_courier = ''.join(character for character in courier.lower() if character.isalnum())
+    if normalized_courier == 'bluedart':
+        courier = 'Bluedart'
     return {
         "awb": shipment.awb,
-        "carrier": shipment.courier,
+        "carrier": courier,
     }
 
 
 def parse_trackparcel_response(payload):
     data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+    booking_details = data.get("booking_details") if isinstance(data, dict) else None
     status = first_value(data, ("status", "current_status", "currentStatus", "shipment_status", "tracking_status"))
+    if not status:
+        status = first_value(booking_details, ("status", "current_status", "currentStatus", "shipment_status", "tracking_status"))
     expected_delivery = first_value(
         data,
         ("expected_delivery_date", "expectedDeliveryDate", "edd", "estimated_delivery_date", "estimatedDeliveryDate"),
@@ -214,7 +225,8 @@ def calculate_next_check_after(status, expected_delivery_date=None, now=None):
         return None
 
     if expected_delivery_date and now.date() < expected_delivery_date:
-        return timezone.make_aware(datetime.combine(expected_delivery_date, time(hour=9)))
+        # Before the delivery date, monitor once per day rather than polling hourly.
+        return now + timedelta(days=1)
 
     if expected_delivery_date and now.date() == expected_delivery_date:
         next_check = now + DELIVERY_DAY_REFRESH_INTERVAL
@@ -228,10 +240,9 @@ def calculate_next_check_after(status, expected_delivery_date=None, now=None):
             return next_check
         return timezone.make_aware(datetime.combine(expected_delivery_date + timedelta(days=1), time(hour=10)))
 
-    # Active shipments are checked hourly. Each successful provider call is
-    # represented by a new tracking notification, including when the status
-    # is unchanged, so the merchant can see that monitoring is still active.
-    return now + timedelta(hours=1)
+    # Without an EDD, use the same low-frequency daily monitor until the
+    # carrier returns an expected delivery date.
+    return now + timedelta(days=1)
 
 
 def _inside_delivery_window(now):

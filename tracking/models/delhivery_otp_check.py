@@ -5,6 +5,8 @@ from django.utils import timezone
 class DelhiveryOtpCheck(models.Model):
     OTP_VERIFIED = "OTP_VERIFIED"
     CODE_VERIFIED = "CODE_VERIFIED"
+    OTP_FIELD_PRESENT = "OTP_FIELD_PRESENT"
+    CODE_FIELD_PRESENT = "CODE_FIELD_PRESENT"
     NON_OTP_DELIVERED = "NON_OTP_DELIVERED"
     UNKNOWN = "UNKNOWN"
     FETCH_FAILED = "FETCH_FAILED"
@@ -12,6 +14,8 @@ class DelhiveryOtpCheck(models.Model):
     OTP_STATUS_CHOICES = [
         (OTP_VERIFIED, "OTP Verified"),
         (CODE_VERIFIED, "Code Verified"),
+        (OTP_FIELD_PRESENT, "OTP Field Present"),
+        (CODE_FIELD_PRESENT, "Code Field Present"),
         (NON_OTP_DELIVERED, "Non-OTP Delivered"),
         (UNKNOWN, "Unknown"),
         (FETCH_FAILED, "Fetch Failed"),
