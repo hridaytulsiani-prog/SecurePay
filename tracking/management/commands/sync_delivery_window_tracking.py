@@ -1,43 +1,37 @@
 from datetime import datetime
+import time
 from zoneinfo import ZoneInfo
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from tracking.api.v1.delhivery_public_tracking import refresh_delhivery_public_snapshot
-from tracking.api.v1.trackparcel import (
-    DELIVERY_WINDOW_END_HOUR,
-    DELIVERY_WINDOW_START_HOUR,
-    refresh_trackparcel_snapshot,
-    should_refresh_snapshot,
-)
+from tracking.api.v1.courier_tracking_sync import normalize_courier, refresh_courier_snapshot
+from tracking.api.v1.trackparcel import refresh_trackparcel_snapshot, should_refresh_snapshot
 from tracking.models.tracking_snapshot import TrackingSnapshot
 
 
 class Command(BaseCommand):
-    help = "Refresh shipments automatically on their expected delivery date during the delivery window."
+    help = "Refresh supported courier shipments using daily and delivery-day schedules."
 
     def add_arguments(self, parser):
-        parser.add_argument("--provider", choices=["delhivery_public", "trackparcel"], default="delhivery_public")
+        parser.add_argument(
+            "--provider",
+            choices=[
+                "all", "delhivery", "dtdc", "shiprocket", "ekart", "shadowfax",
+                "delhivery_public", "trackparcel",
+            ],
+            default="all",
+        )
         parser.add_argument("--limit", type=int, default=500)
         parser.add_argument("--now", help="Optional ISO datetime for local testing, e.g. 2026-09-10T09:00:00+05:30")
 
     def handle(self, *args, **options):
         now = self._get_now(options.get("now"))
-        if not (DELIVERY_WINDOW_START_HOUR <= now.hour < DELIVERY_WINDOW_END_HOUR):
-            self.stdout.write(
-                self.style.WARNING(
-                    f"outside delivery window: {now.isoformat()} "
-                    f"({DELIVERY_WINDOW_START_HOUR}:00-{DELIVERY_WINDOW_END_HOUR}:00)"
-                )
-            )
-            return
-
         provider = options["provider"]
-        today = now.date()
+        if provider == "delhivery_public":
+            provider = "delhivery"
         queryset = (
             TrackingSnapshot.objects.select_related("shipment")
-            .filter(expected_delivery_date=today)
             .exclude(normalized_status__in=["DELIVERED", "CANCELLED", "RTO_DELIVERED", "FAILED_FINAL"])
             .order_by("next_check_after", "last_checked_at", "id")
         )
@@ -45,7 +39,18 @@ class Command(BaseCommand):
         checked = 0
         refreshed = 0
         skipped = 0
+        last_provider_request = {}
         for snapshot in queryset[: options["limit"]]:
+            if provider == "trackparcel":
+                pass
+            elif provider != "all" and provider not in (snapshot.courier or "").lower():
+                continue
+            if provider == "all" and not any(
+                name in (snapshot.courier or "").lower()
+                for name in ("delhivery", "dtdc", "shiprocket", "ekart", "shadowfax")
+            ):
+                continue
+
             checked += 1
             should_refresh, reason = should_refresh_snapshot(snapshot, now=now)
             if not should_refresh:
@@ -54,10 +59,22 @@ class Command(BaseCommand):
                 continue
 
             try:
+                courier_key = provider if provider not in {"all", "trackparcel"} else normalize_courier(snapshot.courier)
+                if courier_key:
+                    elapsed = time.monotonic() - last_provider_request.get(courier_key, 0)
+                    if elapsed < 12:
+                        time.sleep(12 - elapsed)
+
                 if provider == "trackparcel":
                     _, did_refresh, refresh_reason = refresh_trackparcel_snapshot(snapshot.shipment, now=now)
                 else:
-                    _, did_refresh, refresh_reason = refresh_delhivery_public_snapshot(snapshot.shipment, now=now)
+                    _, did_refresh, refresh_reason = refresh_courier_snapshot(
+                        snapshot.shipment,
+                        provider=None if provider == "all" else provider,
+                        now=now,
+                    )
+                if courier_key:
+                    last_provider_request[courier_key] = time.monotonic()
             except Exception as exc:
                 skipped += 1
                 self.stdout.write(self.style.ERROR(f"failed {snapshot.awb}: {exc}"))
@@ -69,7 +86,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"delivery_date={today} provider={provider} checked={checked} refreshed={refreshed} skipped={skipped}"
+                f"provider={provider} checked={checked} refreshed={refreshed} skipped={skipped}"
             )
         )
 

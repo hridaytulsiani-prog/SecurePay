@@ -4,6 +4,7 @@ from .merchantinfo import MerchantInfo
 from .customerinfo import CustomerInfo
 from .orderinfo import OrderInfo
 from .checkout_session import CheckoutSession
+from .merchant_email_verification import MerchantEmailVerification
 from .enquirydata import EnquiryData, EnquiryNote
 from .payment_lifecycle import (
     PaymentEvent,

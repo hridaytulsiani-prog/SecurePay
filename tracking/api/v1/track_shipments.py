@@ -651,10 +651,15 @@ class TrackShipmentTrackParcel(View):
                 status=400,
             )
         except requests.RequestException as exc:
+            upstream_response = getattr(exc, "response", None)
+            upstream_status = getattr(upstream_response, "status_code", None)
+            upstream_body = getattr(upstream_response, "text", "")
             return JsonResponse(
                 {
                     "error": "Failed to fetch shipment status from TrackParcel",
                     "details": str(exc),
+                    "upstream_status": upstream_status,
+                    "upstream_response": upstream_body[:2000],
                     "provider": "trackparcel",
                 },
                 status=502,

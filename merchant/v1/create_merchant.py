@@ -20,13 +20,22 @@
 # change the session format, this file and payments.auth both need updating
 # together, by hand.
 import secrets
+import re
+import logging
+import threading
 from hashlib import sha512
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.core.cache import cache
+from django.core.mail import send_mail
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from payments.models.merchantinfo import MerchantInfo
+from payments.models.merchant_email_verification import MerchantEmailVerification
 from payments.auth import TOKEN_TTL_SECONDS, get_merchant_id_from_token
 
 
@@ -58,6 +67,202 @@ CHECKOUT_FIELD_MAPPING_KEYS = {
     "state",
     "country",
 }
+
+REGISTER_OTP_TTL_SECONDS = 10 * 60
+REGISTER_OTP_RESEND_SECONDS = 45
+REGISTER_OTP_MAX_ATTEMPTS = 5
+logger = logging.getLogger(__name__)
+
+
+def _normalize_email(value):
+    return str(value or "").strip().lower()
+
+
+def _hash_otp(email, otp):
+    return sha512(f"{settings.SECRET_KEY}:{email}:{otp}".encode()).hexdigest()
+
+
+def _generate_numeric_otp():
+    return f"{secrets.randbelow(1000000):06d}"
+
+
+def _validate_registration_payload(data):
+    merchant_name = str(data.get("merchant_name") or "").strip()
+    merchant_email = _normalize_email(data.get("merchant_email"))
+    merchant_phone = str(data.get("merchant_phone") or "").strip()
+    merchant_address = str(data.get("merchant_address") or "").strip()
+    merchant_password = str(data.get("merchant_password") or "")
+
+    if not all([merchant_name, merchant_email, merchant_phone, merchant_address, merchant_password]):
+        return None, "All fields are required."
+
+    try:
+        validate_email(merchant_email)
+    except ValidationError:
+        return None, "Enter a valid email address."
+
+    if MerchantInfo.objects.filter(merchant_email__iexact=merchant_email).exists():
+        return None, "A merchant with this email already exists."
+
+    if not re.fullmatch(r"\d{10,15}", merchant_phone):
+        return None, "Phone must contain 10 to 15 digits."
+
+    if len(merchant_password.strip()) < 8:
+        return None, "Password must be at least 8 characters long."
+
+    return {
+        "merchant_name": merchant_name,
+        "merchant_email": merchant_email,
+        "merchant_phone": merchant_phone,
+        "merchant_address": merchant_address,
+        "password_hash": sha512(merchant_password.strip().encode()).hexdigest(),
+    }, None
+
+
+def _create_verified_merchant(payload):
+    for _ in range(10):
+        try:
+            with transaction.atomic():
+                merchant = MerchantInfo.objects.create(
+                    merchant_name=payload["merchant_name"],
+                    merchant_email=payload["merchant_email"],
+                    merchant_phone=payload["merchant_phone"],
+                    merchant_address=payload["merchant_address"],
+                    password=payload["password_hash"],
+                    merchant_key=secrets.token_hex(4),
+                    merchant_salt=secrets.token_hex(4),
+                )
+            return merchant
+        except IntegrityError:
+            continue
+    return None
+
+
+def _send_registration_otp_email(email, otp):
+    try:
+        send_mail(
+            subject="Verify your SecurePay merchant account",
+            message=(
+                f"Your SecurePay verification code is {otp}.\n\n"
+                "This code expires in 10 minutes. If you did not request this account, you can ignore this email."
+            ),
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+            recipient_list=[email],
+            fail_silently=False,
+        )
+    except Exception:
+        logger.exception("Unable to send merchant registration OTP to %s", email)
+
+
+def _send_registration_otp_email_soon(email, otp):
+    if getattr(settings, "REGISTER_OTP_EMAIL_ASYNC", True):
+        thread = threading.Thread(target=_send_registration_otp_email, args=(email, otp), daemon=True)
+        thread.start()
+        return
+
+    _send_registration_otp_email(email, otp)
+
+
+class SendMerchantRegistrationOtp(APIView):
+    def post(self, request):
+        payload, error = _validate_registration_payload(request.data)
+        if error:
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = payload["merchant_email"]
+        latest = MerchantEmailVerification.objects.filter(
+            email=email,
+            purpose=MerchantEmailVerification.PURPOSE_REGISTER,
+            is_used=False,
+        ).first()
+        if latest and latest.created_at >= timezone.now() - timezone.timedelta(seconds=REGISTER_OTP_RESEND_SECONDS):
+            return Response(
+                {"error": "Verification code already sent. Please wait before requesting another code."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        otp = _generate_numeric_otp()
+        MerchantEmailVerification.objects.filter(
+            email=email,
+            purpose=MerchantEmailVerification.PURPOSE_REGISTER,
+            is_used=False,
+        ).update(is_used=True, used_at=timezone.now())
+        verification = MerchantEmailVerification.objects.create(
+            email=email,
+            purpose=MerchantEmailVerification.PURPOSE_REGISTER,
+            otp_hash=_hash_otp(email, otp),
+            pending_payload=payload,
+            expires_at=timezone.now() + timezone.timedelta(seconds=REGISTER_OTP_TTL_SECONDS),
+        )
+
+        _send_registration_otp_email_soon(email, otp)
+
+        return Response({
+            "ok": True,
+            "message": "Verification code is being sent.",
+            "email": email,
+            "expires_in": REGISTER_OTP_TTL_SECONDS,
+            "resend_after": REGISTER_OTP_RESEND_SECONDS,
+            "verification_id": verification.id,
+        })
+
+
+class VerifyMerchantRegistrationOtp(APIView):
+    def post(self, request):
+        email = _normalize_email(request.data.get("merchant_email"))
+        otp = str(request.data.get("otp") or "").strip()
+
+        if not email or not otp:
+            return Response({"error": "Email and verification code are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        verification = MerchantEmailVerification.objects.filter(
+            email=email,
+            purpose=MerchantEmailVerification.PURPOSE_REGISTER,
+            is_used=False,
+        ).first()
+        if not verification:
+            return Response({"error": "Request a new verification code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if verification.expires_at < timezone.now():
+            verification.is_used = True
+            verification.used_at = timezone.now()
+            verification.save(update_fields=["is_used", "used_at"])
+            return Response({"error": "Verification code expired. Request a new code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if verification.attempt_count >= REGISTER_OTP_MAX_ATTEMPTS:
+            verification.is_used = True
+            verification.used_at = timezone.now()
+            verification.save(update_fields=["is_used", "used_at"])
+            return Response({"error": "Too many incorrect attempts. Request a new code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not re.fullmatch(r"\d{6}", otp) or verification.otp_hash != _hash_otp(email, otp):
+            verification.attempt_count += 1
+            verification.save(update_fields=["attempt_count"])
+            return Response({"error": "Invalid verification code."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if MerchantInfo.objects.filter(merchant_email__iexact=email).exists():
+            verification.is_used = True
+            verification.used_at = timezone.now()
+            verification.save(update_fields=["is_used", "used_at"])
+            return Response({"error": "A merchant with this email already exists."}, status=status.HTTP_400_BAD_REQUEST)
+
+        merchant = _create_verified_merchant(verification.pending_payload)
+        if merchant is None:
+            return Response({"error": "Could not create merchant credentials. Please retry."}, status=500)
+
+        verification.is_used = True
+        verification.used_at = timezone.now()
+        verification.save(update_fields=["is_used", "used_at"])
+
+        return Response(
+            {
+                "ok": True,
+                "message": "Email verified. Merchant created successfully.",
+                "merchant_id": merchant.id,
+                "merchant_email": merchant.merchant_email,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class CreateMerchant(APIView):

@@ -428,7 +428,7 @@ class ShipmentListView(View):
             page = 1
         q = (request.GET.get('q') or '').strip().lower()
 
-        all_shipments = OrderInfo.objects.filter(merchant_id=token_merchant_id).values('pa_order_id', 'order_status', 'payment_state', 'order_amount', 'order_currency', 'customer_info__customer_name', 'customer_info__customer_email', 'customer_info__customer_phone', 'shipment_id__awb', 'shipment_id__courier', 'shipment_id__status', 'pa_payment_id').order_by('-order_date')
+        all_shipments = OrderInfo.objects.filter(merchant_id=token_merchant_id).values('merchant_order_id', 'pa_order_id', 'order_date', 'order_status', 'payment_state', 'order_amount', 'order_currency', 'customer_info__customer_name', 'customer_info__customer_email', 'customer_info__customer_phone', 'shipment_id__awb', 'shipment_id__courier', 'shipment_id__status', 'pa_payment_id').order_by('-order_date')
         # simple filtering by q (match awb, courier, or order id)
         if q:
             filtered = [s for s in all_shipments if q in (s.get('shipment_id__awb','') + s.get('shipment_id__courier','') + s.get('pa_order_id','')).lower()]
@@ -447,6 +447,49 @@ class ShipmentListView(View):
             "page": page,
             "total_pages": total_pages,
             "total": total
+        })
+
+
+class SavedShipmentTrackingView(View):
+    """Return the latest server-saved tracking snapshot without refreshing a provider."""
+
+    def get(self, request, awb, *args, **kwargs):
+        auth_token = _get_auth_token_from_request(request)
+        merchant_id = get_merchant_id_from_token(auth_token)
+        if merchant_id is None:
+            return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
+
+        order = (
+            OrderInfo.objects.filter(merchant_id=merchant_id, shipment_id__awb=awb)
+            .select_related("shipment_id")
+            .first()
+        )
+        if not order or not order.shipment_id:
+            return JsonResponse({"error": "Shipment not found for this merchant"}, status=404)
+
+        snapshot = TrackingSnapshot.objects.filter(shipment=order.shipment_id).first()
+        if not snapshot or not snapshot.last_checked_at:
+            return JsonResponse({"error": "No saved tracking result is available yet", "awb": awb}, status=404)
+
+        shipment = order.shipment_id
+        return JsonResponse({
+            "awb": shipment.awb,
+            "secureupi_order_id": shipment.pa_order_id,
+            "courier": shipment.courier,
+            "status": snapshot.current_status or shipment.status,
+            "normalized_status": snapshot.normalized_status,
+            "history": shipment.history if hasattr(shipment, "history") else [],
+            "provider": snapshot.source,
+            "refreshed": False,
+            "refresh_reason": "served from saved tracking snapshot",
+            "last_checked_at": snapshot.last_checked_at.isoformat(),
+            "next_check_after": snapshot.next_check_after.isoformat() if snapshot.next_check_after else None,
+            "expected_delivery_date": snapshot.expected_delivery_date.isoformat()
+            if snapshot.expected_delivery_date
+            else None,
+            "delivered_at": snapshot.delivered_at.isoformat() if snapshot.delivered_at else None,
+            "tracking": snapshot.raw_response,
+            "created_at": shipment.created_at.isoformat() if hasattr(shipment, "created_at") else None,
         })
 
 
@@ -564,7 +607,8 @@ class MerchantNotificationListView(View):
             return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
 
         now = timezone.localtime()
-        self._refresh_due_tracking(merchant_id, now)
+        # Tracking snapshots are refreshed by the admin/background process.
+        # Merchant polling must only read saved data and never trigger a provider call.
         orders = (
             OrderInfo.objects.filter(merchant_id=merchant_id, shipment_id__isnull=True)
             .select_related("customer_info", "merchant")
@@ -579,6 +623,14 @@ class MerchantNotificationListView(View):
         if merchant:
             self._send_escalation_email(merchant, self._collect_escalation_orders(orders, now), now)
 
+        # Notifications expire after NOTIFICATION_RETENTION_DAYS so the list stays small.
+        retention_days = getattr(settings, "NOTIFICATION_RETENTION_DAYS", 7)
+        retention_cutoff = now - timezone.timedelta(days=retention_days)
+        PaymentNotification.objects.filter(
+            merchant_id=merchant_id,
+            created_at__lt=retention_cutoff,
+        ).delete()
+
         notifications = [
             {
                 "id": f"missing-label-{order.id}",
@@ -592,9 +644,12 @@ class MerchantNotificationListView(View):
             }
             for order in orders
             if order.shipment_label_last_reminded_at is not None
+            and order.shipment_label_last_reminded_at >= retention_cutoff
+            # Seeded demo orders never get labels, so don't nag about them.
+            and not str(order.merchant_order_id).startswith("mock_hold_pa_order")
         ]
 
-        tracking_notifications = self._tracking_status_notifications(merchant_id)
+        tracking_notifications = self._tracking_status_notifications(merchant_id, retention_cutoff)
         notifications.extend(tracking_notifications)
 
         payment_notifications = PaymentNotification.objects.filter(
@@ -622,7 +677,7 @@ class MerchantNotificationListView(View):
             "total": len(notifications),
         })
 
-    def _tracking_status_notifications(self, merchant_id):
+    def _tracking_status_notifications(self, merchant_id, retention_cutoff=None):
         latest_log_id = (
             TrackingApiCallLog.objects.filter(shipment_id=OuterRef("shipment_id_id"))
             .order_by("-called_at")
@@ -648,6 +703,8 @@ class MerchantNotificationListView(View):
             if not snapshot or not snapshot.last_checked_at:
                 continue
             last_checked = snapshot.last_checked_at
+            if retention_cutoff is not None and last_checked < retention_cutoff:
+                continue
             status_text = snapshot.current_status or shipment.status or "Unknown"
             next_check = snapshot.next_check_after.isoformat() if snapshot.next_check_after else ""
             notifications.append(

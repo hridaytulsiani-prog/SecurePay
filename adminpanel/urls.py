@@ -21,6 +21,12 @@ from adminpanel.api.v1.omniware_oversight_views import (
     OmniwarePartnerLoginView,
     OmniwarePartnerOversightReportView,
 )
+from adminpanel.api.v1.contact_views import (
+    AdminContactMessageDetailView,
+    AdminContactMessageListView,
+    AdminContactMessageReplyView,
+    ContactMessageSubmitView,
+)
 from adminpanel.api.v1.stats_views import AdminStatsView
 from adminpanel.api.v1.audit_views import AdminAuditLogListView
 from adminpanel.api.v1.decision_history_views import AdminDecisionHistoryListView
@@ -36,6 +42,11 @@ from adminpanel.api.v1.courier_verification_views import (
     AdminBlueDartVerificationDecisionView,
     AdminDelhiveryOtpCheckView,
     AdminDelhiveryVerificationDecisionView,
+    AdminXpressbeesOtpCheckView,
+    AdminDtdcOtpCheckView,
+    AdminShiprocketOtpCheckView,
+    AdminEkartOtpCheckView,
+    AdminShadowfaxOtpCheckView,
 )
 from adminpanel.api.v1.pa_control_views import (
     PACapabilityListView,
@@ -89,6 +100,10 @@ urlpatterns = [
         name="aggregator-partner-oversight",
     ),
     path("courier-verification/delhivery/", AdminDelhiveryOtpCheckView.as_view(), name="admin-delhivery-otp-check"),
+    path("courier-verification/xpressbees/", AdminXpressbeesOtpCheckView.as_view(), name="admin-xpressbees-otp-check"),
+    path("courier-verification/dtdc/", AdminDtdcOtpCheckView.as_view(), name="admin-dtdc-otp-check"),    path("courier-verification/shiprocket/", AdminShiprocketOtpCheckView.as_view(), name="admin-shiprocket-otp-check"),
+    path("courier-verification/ekart/", AdminEkartOtpCheckView.as_view(), name="admin-ekart-otp-check"),
+    path("courier-verification/shadowfax/", AdminShadowfaxOtpCheckView.as_view(), name="admin-shadowfax-otp-check"),
     path(
         "courier-verification/delhivery/decision/",
         AdminDelhiveryVerificationDecisionView.as_view(),
@@ -119,6 +134,11 @@ urlpatterns = [
         AdminEnquiryResolutionView.as_view(),
         name="admin-enquiry-resolution",
     ),
+    # Public "Get in touch" form + owner-only inbox for it
+    path("contact/", ContactMessageSubmitView.as_view(), name="contact-message-submit"),
+    path("contact-messages/", AdminContactMessageListView.as_view(), name="admin-contact-messages"),
+    path("contact-messages/<int:message_id>/", AdminContactMessageDetailView.as_view(), name="admin-contact-message-detail"),
+    path("contact-messages/<int:message_id>/reply/", AdminContactMessageReplyView.as_view(), name="admin-contact-message-reply"),
     path("stats/", AdminStatsView.as_view(), name="admin-stats"),
     path("audit-logs/", AdminAuditLogListView.as_view(), name="admin-audit-logs"),
     path("decision-history/", AdminDecisionHistoryListView.as_view(), name="admin-decision-history"),

@@ -158,7 +158,9 @@ EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '8'))
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'SecurePay <no-reply@securepay.local>')
+REGISTER_OTP_EMAIL_ASYNC = os.getenv('REGISTER_OTP_EMAIL_ASYNC', 'true').lower() == 'true'
 
 ADMIN_ACCOUNT_SETUP_KEY = os.getenv('ADMIN_ACCOUNT_SETUP_KEY', 'securepay-admin-setup')
 
@@ -194,3 +196,5 @@ TRACKPARCEL_API_KEY = os.getenv('TRACKPARCEL_API_KEY', '')
 TRACKPARCEL_HTTP_METHOD = os.getenv('TRACKPARCEL_HTTP_METHOD', 'GET')
 TRACKPARCEL_AUTH_HEADER = os.getenv('TRACKPARCEL_AUTH_HEADER', 'x-api-key')
 TRACKPARCEL_AUTH_SCHEME = os.getenv('TRACKPARCEL_AUTH_SCHEME', '')
+XPRESSBEES_API_TOKEN = os.getenv('XPRESSBEES_API_TOKEN', '')
+SHIPROCKET_API_TOKEN = os.getenv('SHIPROCKET_API_TOKEN', '')
