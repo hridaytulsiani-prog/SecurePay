@@ -9,6 +9,7 @@
 from django.urls import path
 from django.views.generic import TemplateView
 from payments.api.v1.generate_order import GenerateOrder, VerifyPayment, CreatePayment
+from .v1.issues import MerchantIssueDetail, MerchantIssueMessages, MerchantIssues
 from .v1.create_merchant import (
     CreateMerchant,
     LoginMerchant,
@@ -28,5 +29,8 @@ urlpatterns = [
     path('register/verify-otp/', VerifyMerchantRegistrationOtp.as_view(), name='merchant_register_verify_otp'),
     path('login/', LoginMerchant.as_view(), name='login_merchant'),
     path('courier-preferences/', MerchantCourierPreferences.as_view(), name='merchant_courier_preferences'),
+    path('issues/', MerchantIssues.as_view(), name='merchant_issues'),
+    path('issues/<int:issue_id>/', MerchantIssueDetail.as_view(), name='merchant_issue_detail'),
+    path('issues/<int:issue_id>/messages/', MerchantIssueMessages.as_view(), name='merchant_issue_messages'),
     path('checkout-field-mapping/', MerchantCheckoutFieldMapping.as_view(), name='merchant_checkout_field_mapping'),
 ]

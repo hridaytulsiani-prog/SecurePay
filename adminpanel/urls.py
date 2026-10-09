@@ -21,6 +21,22 @@ from adminpanel.api.v1.omniware_oversight_views import (
     OmniwarePartnerLoginView,
     OmniwarePartnerOversightReportView,
 )
+from adminpanel.api.v1.customer_issue_views import (
+    AdminCustomerIssueDetailView,
+    AdminCustomerIssueListView,
+    AdminCustomerIssueMessageView,
+    AdminCustomerIssueNoteView,
+    CustomerIssueSubmitView,
+)
+from adminpanel.api.v1.merchant_issue_report import AdminMerchantIssueOrderReportView
+from adminpanel.api.v1.order_check_views import AdminOrderCheckView
+from adminpanel.api.v1.search_views import AdminSearchView
+from adminpanel.api.v1.merchant_issue_views import (
+    AdminMerchantIssueDetailView,
+    AdminMerchantIssueListView,
+    AdminMerchantIssueMessageView,
+    AdminMerchantIssueNoteView,
+)
 from adminpanel.api.v1.contact_views import (
     AdminContactMessageDetailView,
     AdminContactMessageListView,
@@ -136,6 +152,18 @@ urlpatterns = [
     ),
     # Public "Get in touch" form + owner-only inbox for it
     path("contact/", ContactMessageSubmitView.as_view(), name="contact-message-submit"),
+    path("search/", AdminSearchView.as_view(), name="admin-search"),
+    path("orders/check/", AdminOrderCheckView.as_view(), name="admin-order-check"),
+    path("customer-issue/", CustomerIssueSubmitView.as_view(), name="customer-issue-submit"),
+    path("customer-issues/", AdminCustomerIssueListView.as_view(), name="admin-customer-issues"),
+    path("customer-issues/<int:issue_id>/", AdminCustomerIssueDetailView.as_view(), name="admin-customer-issue-detail"),
+    path("customer-issues/<int:issue_id>/notes/", AdminCustomerIssueNoteView.as_view(), name="admin-customer-issue-notes"),
+    path("customer-issues/<int:issue_id>/messages/", AdminCustomerIssueMessageView.as_view(), name="admin-customer-issue-messages"),
+    path("merchant-issues/", AdminMerchantIssueListView.as_view(), name="admin-merchant-issues"),
+    path("merchant-issues/<int:issue_id>/", AdminMerchantIssueDetailView.as_view(), name="admin-merchant-issue-detail"),
+    path("merchant-issues/<int:issue_id>/report/", AdminMerchantIssueOrderReportView.as_view(), name="admin-merchant-issue-report"),
+    path("merchant-issues/<int:issue_id>/notes/", AdminMerchantIssueNoteView.as_view(), name="admin-merchant-issue-notes"),
+    path("merchant-issues/<int:issue_id>/messages/", AdminMerchantIssueMessageView.as_view(), name="admin-merchant-issue-messages"),
     path("contact-messages/", AdminContactMessageListView.as_view(), name="admin-contact-messages"),
     path("contact-messages/<int:message_id>/", AdminContactMessageDetailView.as_view(), name="admin-contact-message-detail"),
     path("contact-messages/<int:message_id>/reply/", AdminContactMessageReplyView.as_view(), name="admin-contact-message-reply"),

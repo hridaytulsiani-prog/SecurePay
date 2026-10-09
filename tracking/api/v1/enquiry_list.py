@@ -53,7 +53,7 @@ class EnquiryListView(View):
 
         orders_by_id = {
             order.pa_order_id: order
-            for order in OrderInfo.objects.filter(pa_order_id__in=merchant_order_ids).select_related("customer_info")
+            for order in OrderInfo.objects.filter(pa_order_id__in=merchant_order_ids).select_related("customer_info", "shipment_id")
         }
 
         # NOTE: an order_id can legitimately map to MULTIPLE EnquiryData rows
@@ -66,6 +66,7 @@ class EnquiryListView(View):
         for enquiry in enquiries:
             order = orders_by_id.get(enquiry.order_id)
             customer = getattr(order, "customer_info", None)
+            shipment = getattr(order, "shipment_id", None)
 
             rows.append(
                 {
@@ -85,6 +86,8 @@ class EnquiryListView(View):
                     "customer_name": getattr(customer, "customer_name", None),
                     "customer_phone": getattr(customer, "customer_phone", None),
                     "customer_email": getattr(customer, "customer_email", None),
+                    "shipment_awb": getattr(shipment, "awb", None),
+                    "shipment_courier": getattr(shipment, "courier", None),
                 }
             )
 
@@ -96,6 +99,7 @@ class EnquiryListView(View):
                 or q in (row["customer_name"] or "").lower()
                 or q in (row["customer_phone"] or "").lower()
                 or q in (row["enquiry_id"] or "").lower()
+                or q in (row["shipment_awb"] or "").lower()
             ]
 
         total = len(rows)

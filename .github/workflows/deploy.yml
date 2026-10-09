@@ -1,0 +1,73 @@
+name: Deploy SecurePay backend to EC2
+
+# Same trigger as the frontend repos: pushing to the `production` branch deploys.
+on:
+  push:
+    branches:
+      - production
+
+# Never run two deploys at once (a second push waits for the first to finish).
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Load the deploy key and trust the server's host key.
+      - name: Set up SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      # Copy the code to the server. Deliberately NO --delete, and these are never touched on the server:
+      #   .env             secrets live only on the server
+      #   media/           uploaded files
+      #   staticfiles/     rebuilt by collectstatic below
+      #   __pycache__/     holds pdf_internal_segments_check.cpython-314.pyc, which exists nowhere else
+      - name: Copy code to the server
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          rsync -az \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.venv/' \
+            --exclude '.env' \
+            --exclude 'media/' \
+            --exclude 'staticfiles/' \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            ./ "$EC2_USER@$EC2_HOST:~/SecurePay/"
+
+      # Install packages, update the database, collect static files, restart, and check the API answers.
+      - name: Install, migrate and restart
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd ~/SecurePay
+          set -a; . ~/.env; set +a
+          ~/.local/bin/uv pip install --python ~/venv/bin/python -r requirements.txt
+          ~/venv/bin/python manage.py migrate --noinput
+          ~/venv/bin/python manage.py collectstatic --noinput
+          sudo systemctl restart securepay
+          sleep 4
+          systemctl is-active securepay
+          curl -fsS -o /dev/null -H "Host: api.escrosafe.com" http://127.0.0.1:8000/openapi.json
+          echo "Deploy OK"
+          REMOTE

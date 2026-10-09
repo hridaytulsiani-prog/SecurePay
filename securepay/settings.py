@@ -17,16 +17,57 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _load_local_env_file(path):
+    """Local development convenience: read KEY=VALUE lines from SecurePay/.env into the environment.
+
+    Real environment variables always win (on the server they come from the systemd service, and there is no
+    .env file in this folder). Lines starting with # and blank lines are ignored; single or double quotes around a
+    value are stripped.
+    """
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_load_local_env_file(BASE_DIR / '.env')
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-j0k2^t&0kn2^mi1+#l_8p=4*6jbdvy6&ht=u(%!fzf4&o((j3x'
+# Production values come from environment variables (see the server's .env). The defaults below only keep local
+# development working: set DJANGO_DEBUG=false and DJANGO_SECRET_KEY on the server.
+def env_list(name, default=''):
+    return [item.strip() for item in os.getenv(name, default).split(',') if item.strip()]
+
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DJANGO_DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = ["*"]
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', '')
+if not SECRET_KEY:
+    if not DEBUG:
+        raise RuntimeError('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false.')
+    SECRET_KEY = 'django-insecure-j0k2^t&0kn2^mi1+#l_8p=4*6jbdvy6&ht=u(%!fzf4&o((j3x'
+
+# Comma separated, e.g. "54.206.48.56,api.example.com". Open only while developing locally.
+ALLOWED_HOSTS = env_list('ALLOWED_HOSTS', '*' if DEBUG else '')
+
+# Full origins (scheme included), e.g. "https://app.example.com". Needed for logins/forms posted from those pages.
+CSRF_TRUSTED_ORIGINS = env_list('CSRF_TRUSTED_ORIGINS')
+
+# Behind nginx with HTTPS: trust the protocol nginx forwards so Django knows the request was secure.
+if os.getenv('BEHIND_HTTPS_PROXY', 'false').lower() == 'true':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
@@ -61,7 +102,7 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:5173',
     'http://localhost:5174',
     'http://127.0.0.1:5174',
-]
+] + env_list('CORS_ALLOWED_ORIGINS')
 
 CORS_PUBLIC_ALLOW_ALL_PATH_PREFIXES = [
     '/payments/v1/checkout-sessions/',
@@ -94,13 +135,27 @@ WSGI_APPLICATION = 'securepay.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'secureupi_db',
-        'USER': 'secureupi_user',
-        'PASSWORD': 'secureupi',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': os.getenv('DB_NAME', 'secureupi_db'),
+        'USER': os.getenv('DB_USER', 'secureupi_user'),
+        'PASSWORD': os.getenv('DB_PASSWORD', 'secureupi'),
+        'HOST': os.getenv('DB_HOST', 'localhost'),
+        'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
+
+
+# Cache: merchant login sessions live here ("merchant_<id>:<token>"), so it must be shared by every server worker.
+# On the server set REDIS_URL (e.g. redis://127.0.0.1:6379/1); without it Django uses a per-process memory cache,
+# which is fine for one local process but makes sessions vanish when several workers run.
+REDIS_URL = os.getenv('REDIS_URL', '')
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {'CLIENT_CLASS': 'django_redis.client.DefaultClient'},
+        }
+    }
 
 
 # Password validation
@@ -138,6 +193,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+# `manage.py collectstatic` gathers the admin/API static files here; nginx serves this folder.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -161,6 +218,8 @@ EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
 EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '8'))
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'SecurePay <no-reply@securepay.local>')
 REGISTER_OTP_EMAIL_ASYNC = os.getenv('REGISTER_OTP_EMAIL_ASYNC', 'true').lower() == 'true'
+# TEMPORARY test bypass: when set (e.g. 123456), that code verifies any registration. Leave empty in production.
+REGISTER_OTP_BYPASS_CODE = os.getenv('REGISTER_OTP_BYPASS_CODE', '')
 
 ADMIN_ACCOUNT_SETUP_KEY = os.getenv('ADMIN_ACCOUNT_SETUP_KEY', 'securepay-admin-setup')
 
