@@ -235,7 +235,12 @@ class VerifyMerchantRegistrationOtp(APIView):
             verification.save(update_fields=["is_used", "used_at"])
             return Response({"error": "Too many incorrect attempts. Request a new code."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not re.fullmatch(r"\d{6}", otp) or verification.otp_hash != _hash_otp(email, otp):
+        # TEMPORARY: while email delivery is not set up, REGISTER_OTP_BYPASS_CODE (e.g. 123456) is accepted for any
+        # email that has requested a code. Off unless that env var is set; remove it once real email works.
+        bypass_code = str(getattr(settings, "REGISTER_OTP_BYPASS_CODE", "") or "").strip()
+        bypass_ok = bool(bypass_code) and secrets.compare_digest(otp, bypass_code)
+
+        if not bypass_ok and (not re.fullmatch(r"\d{6}", otp) or verification.otp_hash != _hash_otp(email, otp)):
             verification.attempt_count += 1
             verification.save(update_fields=["attempt_count"])
             return Response({"error": "Invalid verification code."}, status=status.HTTP_400_BAD_REQUEST)

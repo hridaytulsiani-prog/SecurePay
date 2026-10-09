@@ -2,3 +2,10 @@
 __pycache__/
 *.pyc
 *.cpython-*.pyc
+.env
+.env.local
+*.pem
+deploy_key
+deploy_key.pub
+staticfiles/
+.venv/

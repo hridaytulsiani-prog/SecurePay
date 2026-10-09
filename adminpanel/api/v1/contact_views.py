@@ -24,8 +24,10 @@ from adminpanel.permissions import AdminAPIView
 MAX_MESSAGES_PER_IP_PER_HOUR = 5
 MAX_NAME_LENGTH = 120
 MAX_ORDER_ID_LENGTH = 64
+MAX_TOPIC_LENGTH = 80
 MAX_MESSAGE_LENGTH = 2000
 VALID_STATUSES = {choice[0] for choice in ContactMessage.STATUS_CHOICES}
+VALID_SOURCES = {choice[0] for choice in ContactMessage.SOURCE_CHOICES}
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,8 @@ def _client_ip(request):
 def _serialize(message):
     return {
         "id": message.id,
+        "source": message.source,
+        "topic": message.topic,
         "name": message.name,
         "email": message.email,
         "order_id": message.order_id,
@@ -79,6 +83,13 @@ class ContactMessageSubmitView(APIView):
         email = str(data.get("email") or "").strip()
         order_id = str(data.get("order_id") or "").strip()
         message = str(data.get("message") or "").strip()
+        # "merchant" comes from the merchant site's landing-page form; anything else is a customer message.
+        source = (
+            ContactMessage.SOURCE_MERCHANT
+            if str(data.get("source") or "").strip() == ContactMessage.SOURCE_MERCHANT
+            else ContactMessage.SOURCE_CUSTOMER
+        )
+        topic = str(data.get("topic") or "").strip()[:MAX_TOPIC_LENGTH]
 
         if not name or not email or not message:
             return Response({"error": "Name, email and message are required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -106,6 +117,8 @@ class ContactMessageSubmitView(APIView):
                 )
 
         ContactMessage.objects.create(
+            source=source,
+            topic=topic,
             name=name,
             email=email,
             order_id=order_id,
@@ -133,8 +146,13 @@ class AdminContactMessageListView(AdminAPIView):
 
         status_filter = (request.GET.get("status") or "").strip()
         q = (request.GET.get("q") or "").strip()
+        # The Messages page lists customer messages and the Merchant queries page lists merchant ones.
+        # Without a source the customer inbox is returned, as before.
+        source_filter = (request.GET.get("source") or "").strip()
+        if source_filter not in VALID_SOURCES:
+            source_filter = ContactMessage.SOURCE_CUSTOMER
 
-        qs = ContactMessage.objects.select_related("handled_by")
+        qs = ContactMessage.objects.select_related("handled_by").filter(source=source_filter)
         if status_filter in VALID_STATUSES:
             qs = qs.filter(status=status_filter)
         if q:
@@ -143,6 +161,7 @@ class AdminContactMessageListView(AdminAPIView):
                 | Q(email__icontains=q)
                 | Q(order_id__icontains=q)
                 | Q(message__icontains=q)
+                | Q(topic__icontains=q)
             )
 
         total = qs.count()
@@ -150,7 +169,7 @@ class AdminContactMessageListView(AdminAPIView):
         start = (page - 1) * limit
 
         counts = {value: 0 for value in VALID_STATUSES}
-        for row in ContactMessage.objects.values("status").annotate(total=Count("id")):
+        for row in ContactMessage.objects.filter(source=source_filter).values("status").annotate(total=Count("id")):
             counts[row["status"]] = row["total"]
 
         return Response(

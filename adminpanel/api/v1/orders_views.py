@@ -166,6 +166,7 @@ class AdminOrderListView(AdminAPIView):
                     str(v) for v in [
                         r.get("merchant_order_id"),
                         r.get("pa_order_id"),
+                        r.get("shipment_id__awb"),
                         r.get("customer_info__customer_name"),
                         r.get("customer_info__customer_email"),
                         r.get("customer_info__customer_phone"),
@@ -298,6 +299,7 @@ class AdminEnquiryListView(AdminAPIView):
                 "order_currency",
                 "order_status",
                 "merchant__merchant_name",
+                "merchant__merchant_email",
                 "customer_info__customer_name",
                 "customer_info__customer_email",
                 "customer_info__customer_phone",
@@ -347,6 +349,7 @@ class AdminEnquiryListView(AdminAPIView):
             e["order_currency"] = order.get("order_currency") if order else None
             e["order_status"] = order.get("order_status") if order else None
             e["merchant_name"] = order.get("merchant__merchant_name") if order else None
+            e["merchant_email"] = order.get("merchant__merchant_email") if order else None
             e["customer_name"] = order.get("customer_info__customer_name") if order else None
             e["customer_email"] = order.get("customer_info__customer_email") if order else None
             e["customer_phone"] = order.get("customer_info__customer_phone") if order else None
@@ -368,7 +371,10 @@ class AdminEnquiryListView(AdminAPIView):
                         e.get("order_id"),
                         e.get("customer_name"),
                         e.get("customer_email"),
+                        e.get("customer_phone"),
                         e.get("merchant_name"),
+                        e.get("merchant_email"),
+                        e.get("shipment_awb"),
                     ] if v
                 ).lower()
             ]
