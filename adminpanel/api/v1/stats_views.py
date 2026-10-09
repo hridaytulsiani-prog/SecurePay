@@ -13,6 +13,7 @@ from payments.models.merchantinfo import MerchantInfo
 
 
 class AdminStatsView(AdminAPIView):
+    required_permission = "dashboard.view"
     """Headline numbers for the admin Overview page: totals plus a status
     breakdown for orders and enquiries, computed with DB aggregates
     (.count()/.aggregate()/.annotate()) rather than pulling every row into

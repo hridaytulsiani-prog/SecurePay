@@ -22,12 +22,42 @@
 import secrets
 from hashlib import sha512
 from django.db import IntegrityError, transaction
+from django.core.cache import cache
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from payments.models.merchantinfo import MerchantInfo
-from django_redis import get_redis_connection
-from payments.auth import TOKEN_TTL_SECONDS
+from payments.auth import TOKEN_TTL_SECONDS, get_merchant_id_from_token
+
+
+SUPPORTED_COURIERS = {
+    "blue_dart": "Blue Dart",
+    "delhivery": "Delhivery",
+    "dtdc": "DTDC",
+    "ekart": "Ekart",
+    "shadowfax": "Shadowfax",
+    "shiprocket": "Shiprocket",
+    "xpressbees": "Xpressbees",
+}
+
+BLUE_DART_PLANS = {
+    "basic": {"label": "Basic", "otp_enabled": False},
+    "otp_enabled": {"label": "OTP Enabled", "otp_enabled": True},
+    "otp_enabled_plus": {"label": "OTP Enabled Plus", "otp_enabled": True},
+}
+
+CHECKOUT_FIELD_MAPPING_KEYS = {
+    "order_id",
+    "amount",
+    "customer_name",
+    "phone",
+    "email",
+    "address",
+    "pincode",
+    "city",
+    "state",
+    "country",
+}
 
 
 class CreateMerchant(APIView):
@@ -41,10 +71,9 @@ class CreateMerchant(APIView):
         merchant_email = request.data.get("merchant_email")
         merchant_phone = request.data.get("merchant_phone")
         merchant_address = request.data.get("merchant_address")
-        merchant_username = request.data.get("merchant_username")
         merchant_password = request.data.get("merchant_password")
 
-        if not all([merchant_name, merchant_email, merchant_phone, merchant_address, merchant_username, merchant_password]):
+        if not all([merchant_name, merchant_email, merchant_phone, merchant_address, merchant_password]):
             return Response({"error": "All fields are required."}, status=status.HTTP_400_BAD_REQUEST)
 
         # merchant_key/merchant_salt are each random 8-hex-char strings
@@ -61,7 +90,6 @@ class CreateMerchant(APIView):
                         merchant_email=merchant_email,
                         merchant_phone=merchant_phone,
                         merchant_address=merchant_address,
-                        username=merchant_username,
                         password=sha512(merchant_password.encode()).hexdigest(),
                         merchant_key=self.generate_key(),
                         merchant_salt=self.generate_salt(),
@@ -85,8 +113,6 @@ class CreateMerchant(APIView):
 
     def generate_salt(self) -> str:
         return secrets.token_hex(4)
-
-
 
 
 class LoginMerchant(APIView):
@@ -125,15 +151,15 @@ class LoginMerchant(APIView):
         session_token = secrets.token_urlsafe(32)
         combined_token = f"{merchant.id}-{session_token}"
 
-        redis_conn = get_redis_connection("default")
         redis_key = f"merchant_{merchant.id}:{session_token}"
         redis_value = str(merchant.id)
-        redis_conn.setex(redis_key, TOKEN_TTL_SECONDS, redis_value)
+        cache.set(redis_key, redis_value, TOKEN_TTL_SECONDS)
 
         response = Response(
             {
                 "message": "Login successful.",
                 "merchant_id": merchant.id,
+                "merchant_key": merchant.merchant_key,
                 "token": combined_token,
                 "expires_in": TOKEN_TTL_SECONDS
             },
@@ -147,3 +173,112 @@ class LoginMerchant(APIView):
             path="/",
         )
         return response
+
+
+class MerchantCourierPreferences(APIView):
+    """Read and save the courier setup shown after a merchant's first login."""
+
+    def _merchant(self, request):
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip()
+        merchant_id = get_merchant_id_from_token(token)
+        if not merchant_id:
+            return None
+        try:
+            return MerchantInfo.objects.get(id=merchant_id)
+        except MerchantInfo.DoesNotExist:
+            return None
+
+    def get(self, request):
+        merchant = self._merchant(request)
+        if merchant is None:
+            return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        return Response({
+            "courier_setup_completed": merchant.courier_setup_completed,
+            "courier_preferences": merchant.courier_preferences or {},
+        })
+
+    def post(self, request):
+        merchant = self._merchant(request)
+        if merchant is None:
+            return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        courier_keys = request.data.get("couriers")
+        blue_dart_plan = request.data.get("blue_dart_plan")
+        if not isinstance(courier_keys, list) or not courier_keys:
+            return Response({"error": "Select at least one courier partner."}, status=status.HTTP_400_BAD_REQUEST)
+
+        courier_keys = list(dict.fromkeys(courier_keys))
+        unsupported = [key for key in courier_keys if key not in SUPPORTED_COURIERS]
+        if unsupported:
+            return Response({"error": "One or more courier partners are not supported."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if "blue_dart" in courier_keys:
+            if blue_dart_plan not in BLUE_DART_PLANS:
+                return Response({"error": "Choose a Blue Dart service plan."}, status=status.HTTP_400_BAD_REQUEST)
+            if not BLUE_DART_PLANS[blue_dart_plan]["otp_enabled"]:
+                return Response({"error": "SecurePay supports only OTP-enabled Blue Dart plans."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            blue_dart_plan = None
+
+        merchant.courier_preferences = {
+            "couriers": courier_keys,
+            "blue_dart_plan": blue_dart_plan,
+        }
+        merchant.courier_setup_completed = True
+        merchant.save(update_fields=["courier_preferences", "courier_setup_completed"])
+        return Response({
+            "message": "Courier preferences saved.",
+            "courier_setup_completed": True,
+            "courier_preferences": merchant.courier_preferences,
+        })
+
+
+class MerchantCheckoutFieldMapping(APIView):
+    """Merchant-facing setup for the one-line SecurePay button SDK."""
+
+    def _merchant(self, request):
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip()
+        merchant_id = get_merchant_id_from_token(token)
+        if not merchant_id:
+            return None
+        try:
+            return MerchantInfo.objects.get(id=merchant_id)
+        except MerchantInfo.DoesNotExist:
+            return None
+
+    def get(self, request):
+        merchant = self._merchant(request)
+        if merchant is None:
+            return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        return Response({
+            "checkout_field_mapping": merchant.checkout_field_mapping or {},
+        })
+
+    def post(self, request):
+        merchant = self._merchant(request)
+        if merchant is None:
+            return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        incoming = request.data.get("checkout_field_mapping", request.data)
+        if not isinstance(incoming, dict):
+            return Response({"error": "checkout_field_mapping must be an object."}, status=status.HTTP_400_BAD_REQUEST)
+
+        mapping = {}
+        for key in CHECKOUT_FIELD_MAPPING_KEYS:
+            value = incoming.get(key)
+            if value is None:
+                continue
+            clean_value = str(value).strip()
+            if clean_value:
+                mapping[key] = clean_value[:160]
+
+        merchant.checkout_field_mapping = mapping
+        merchant.save(update_fields=["checkout_field_mapping"])
+        return Response({
+            "message": "Checkout field mapping saved.",
+            "checkout_field_mapping": merchant.checkout_field_mapping,
+        })

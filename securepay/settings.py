@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -25,7 +26,7 @@ SECRET_KEY = 'django-insecure-j0k2^t&0kn2^mi1+#l_8p=4*6jbdvy6&ht=u(%!fzf4&o((j3x
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -37,6 +38,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'adminpanel',
     'payments',
     'tracking',
     'securepay',
@@ -45,12 +47,25 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'securepay.cors.SimpleCORSMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+
+CORS_ALLOWED_ORIGINS = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:5174',
+    'http://127.0.0.1:5174',
+]
+
+CORS_PUBLIC_ALLOW_ALL_PATH_PREFIXES = [
+    '/payments/v1/checkout-sessions/',
+    '/payments/v1/button-config/',
 ]
 
 ROOT_URLCONF = 'securepay.urls'
@@ -124,6 +139,9 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
@@ -133,3 +151,46 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
+
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', '')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'true').lower() == 'true'
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'SecurePay <no-reply@securepay.local>')
+
+ADMIN_ACCOUNT_SETUP_KEY = os.getenv('ADMIN_ACCOUNT_SETUP_KEY', 'securepay-admin-setup')
+
+SHIPMENT_LABEL_REMINDER_TIMEZONE = 'Asia/Kolkata'
+SHIPMENT_LABEL_REMINDER_HOURS = (10, 16)
+SHIPMENT_LABEL_ESCALATION_DAYS = 4
+
+# Additive payment lifecycle configuration. Provider secrets should be set in
+# environment variables in deployed environments; unsigned events are only
+# enabled explicitly for local test fixtures.
+PAYMENT_WEBHOOK_SECRET = os.getenv('PAYMENT_WEBHOOK_SECRET', '')
+PHONEPE_WEBHOOK_SECRET = os.getenv('PHONEPE_WEBHOOK_SECRET', '')
+PAYMENT_WEBHOOK_ALLOW_UNSIGNED_TEST_EVENTS = os.getenv('PAYMENT_WEBHOOK_ALLOW_UNSIGNED_TEST_EVENTS', 'false').lower() == 'true'
+PAYMENT_SETTLEMENT_URLS = {
+    'phonepe': os.getenv('PHONEPE_SETTLEMENT_STATUS_URL', ''),
+    'razorpay': os.getenv('RAZORPAY_SETTLEMENT_STATUS_URL', ''),
+}
+PAYMENT_SETTLEMENT_HEADERS = {}
+PAYMENT_REFUND_ADAPTER = os.getenv('PAYMENT_REFUND_ADAPTER', 'omniware')
+
+OMNIWARE_BASE_URL = os.getenv('OMNIWARE_BASE_URL', 'https://pgbiz.omniware.in')
+OMNIWARE_API_KEY = os.getenv('OMNIWARE_API_KEY', '')
+OMNIWARE_SALT = os.getenv('OMNIWARE_SALT', '')
+OMNIWARE_WEBHOOK_SECRET = os.getenv('OMNIWARE_WEBHOOK_SECRET', '')
+OMNIWARE_PARTNER_ACCESS_TOKEN = os.getenv('OMNIWARE_PARTNER_ACCESS_TOKEN', '1234')
+OMNIWARE_REFUND_ENDPOINT = os.getenv('OMNIWARE_REFUND_ENDPOINT', '/v2/refundrequest')
+OMNIWARE_REFUND_STATUS_ENDPOINT = os.getenv('OMNIWARE_REFUND_STATUS_ENDPOINT', '/v2/refundstatus')
+
+TRACKING_PROVIDER = os.getenv('TRACKING_PROVIDER', 'trackparcel')
+TRACKPARCEL_BASE_URL = os.getenv('TRACKPARCEL_BASE_URL', 'https://www.trackparcel.in')
+TRACKPARCEL_TRACK_ENDPOINT = os.getenv('TRACKPARCEL_TRACK_ENDPOINT', '/api/v1/track')
+TRACKPARCEL_API_KEY = os.getenv('TRACKPARCEL_API_KEY', '')
+TRACKPARCEL_HTTP_METHOD = os.getenv('TRACKPARCEL_HTTP_METHOD', 'GET')
+TRACKPARCEL_AUTH_HEADER = os.getenv('TRACKPARCEL_AUTH_HEADER', 'x-api-key')
+TRACKPARCEL_AUTH_SCHEME = os.getenv('TRACKPARCEL_AUTH_SCHEME', '')

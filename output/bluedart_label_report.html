@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blue Dart Hidden PDF Label Report</title>
+<style>
+body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #1f2937; background: #f8fafc; }
+.card { background: white; border: 1px solid #dbe2ea; border-radius: 8px; padding: 16px 18px; margin-bottom: 18px; }
+.table-wrap { overflow-x: auto; border: 1px solid #dbe2ea; background: white; }
+table { min-width: 2200px; width: 100%; border-collapse: collapse; background: white; }
+th, td { border: 1px solid #dbe2ea; padding: 8px; vertical-align: top; text-align: left; font-size: 12px; line-height: 1.35; }
+th { background: #eef2f7; position: sticky; top: 0; }
+code { font-family: Consolas, monospace; font-size: 11px; word-break: break-all; }
+.verdict { font-weight: 700; white-space: nowrap; }
+.match { color: #166534; }
+.partial { color: #a16207; }
+.suspicious { color: #b91c1c; }
+.finding { display: block; margin-bottom: 4px; }
+.sev-high { color: #b91c1c; font-weight: 700; }
+.sev-medium { color: #a16207; font-weight: 700; }
+.sev-low { color: #166534; font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="card table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>Label name</th>
+        <th>Verdict</th>
+        <th>Score</th>
+        <th>Header</th>
+        <th>EOF</th>
+        <th>Xobjects</th>
+        <th>Image ops</th>
+        <th>Producer chain</th>
+        <th>TJ and Tj value</th>
+        <th>TD/Tf/Tj value</th>
+        <th>Grammar contribution</th>
+        <th>/Prev</th>
+        <th>Object serialization</th>
+        <th>Document IDs</th>
+        <th>Page content compression</th>
+        <th>Trailer comment</th>
+        <th>Barcode values</th>
+        <th>Barcode textmatch</th>
+        <th>Barcode contributions</th>
+        <th>Findings</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>bluedart-1.pdf</td><td>Bluedart (matches expected bluedart)</td><td class="verdict match">BASELINE REAL SAMPLE</td><td>100</td><td>%PDF-1.3<br>offset=0<br>-</td><td>count=1<br>after=1<br>-</td><td>4<br>-</td><td>2<br>-</td><td>iText -&gt; pdftk<br>-</td><td>TJ=45<br>Tj=0<br>-</td><td>Td/Tf/TJ=43<br>-</td><td>match; -0<br>-<br><code>915e1aa9089a1aba83667d7fcfb0b1aa756cf4e8569166f24c3d6ec4ce838a97</code></td><td>0<br>-</td><td>nonsequential; ids=4,5,6,7,9,10,8,12,13,11,14,15,16,17,18,3,1,20,...; deltas=1,1,1,2,1,-2,4,1,-2,3,1,1,...<br>-</td><td>two different IDs; first=00cdb952...90351035; second=18dcfc5f...0d3ac47d<br>-</td><td>Flate<br>-</td><td>ordinary trailer<br>-</td><td>69619515136, 1601096933796 (Code 128)<br>-</td><td>all decoded values found in text<br>-</td><td>decoded/text match; -0<br>-</td><td><span class="finding">No gate mismatches found.</span></td></tr><tr><td>bluedart-2.pdf</td><td>Bluedart (matches expected bluedart)</td><td class="verdict match">BASELINE REAL SAMPLE</td><td>100</td><td>%PDF-1.3<br>offset=0<br>-</td><td>count=1<br>after=1<br>-</td><td>4<br>-</td><td>2<br>-</td><td>iText -&gt; pdftk<br>-</td><td>TJ=43<br>Tj=0<br>-</td><td>Td/Tf/TJ=41<br>-</td><td>match; -0<br>-<br><code>d7aa80b064b18169c24a95b8759581f57077c2076d4db2e8c25ac970a1481a70</code></td><td>0<br>-</td><td>nonsequential; ids=4,5,6,7,9,10,8,12,13,11,14,15,16,17,18,3,1,20,...; deltas=1,1,1,2,1,-2,4,1,-2,3,1,1,...<br>-</td><td>two different IDs; first=5123a476...7c96fc8e; second=376c8eb3...fafb620d<br>-</td><td>Flate<br>-</td><td>ordinary trailer<br>-</td><td>69619528300, 1601097370393 (Code 128)<br>-</td><td>all decoded values found in text<br>-</td><td>decoded/text match; -0<br>-</td><td><span class="finding">No gate mismatches found.</span></td></tr><tr><td>Bluedart-Sample.pdf</td><td>Blue Dart (matches expected bluedart)</td><td class="verdict suspicious">BLUE DART SUSPICIOUS</td><td>0</td><td>%PDF-1.4<br>offset=0<br>INFO; PDF header version differs from real sample: got %PDF-1.4, real %PDF-1.3.</td><td>count=2<br>after=1<br>INFO; EOF count differs from real sample: got 2, real 1.</td><td>0<br>FAIL; No reusable XObjects were found, while the real Blue Dart sample contains internal reusable objects.</td><td>0<br>FAIL; No image/object draw operations were found, while the real Blue Dart sample draws internal objects on page.</td><td>ReportLab<br>INFO; Producer chain differs from real sample: got ReportLab, real iText -&gt; pdftk.</td><td>TJ=0<br>Tj=49<br>FAIL; Tj Text Operator Count differs from real sample: got 49, real 0. | FAIL; TJ Text Operator Count differs from real sample: got 0, real 45.</td><td>Td/Tf/TJ=0<br>FAIL; Td/Tf/TJ grammar count differs from real sample: got 0, real 43.</td><td>Tj/TJ mismatch; -24<br>INFO; Content grammar hash differs from real sample.<br><code>720d64808fd2375f3a2ca188e87786f53ead5755663d1a753520dc8e6381ab83</code></td><td>1<br>INFO; /Prev count differs from real sample: got 1, real 0.</td><td>nonsequential; ids=1,2,3,4,5,6,7,8,9,6,10,11; deltas=1,1,1,1,1,1,1,1,-3,4,1<br>PASS; Object serialization matches real sample: nonsequential.</td><td>same repeated twice; first=4a3d6711...b40dfa6e; second=4a3d6711...b40dfa6e<br>INFO; Document ID pattern differs from real sample: got same repeated twice, real two different IDs.</td><td>-<br>INFO; Page content compression differs from real sample: got -, real Flate.</td><td>ordinary trailer<br>INFO; Trailer comment pattern matches real sample: ordinary trailer.</td><td>BDDEMO482260827, BLUEDART_DEMO_WAYBILL=BDDEMO482260827 (Code 128, QR Code)<br>INFO; Barcode count/format differs from real sample: got count=2, formats=Code 128, QR Code; real count=2, formats=Code 128.</td><td>1 decoded value(s) missing from text<br>INFO; 1 decoded barcode value(s) are missing from extracted text.</td><td>barcode/text mismatch; -24<br>INFO; Barcode/text mismatch.</td><td><span class="finding"><span class="sev-high">FAIL</span> Xobjects: No reusable XObjects were found, while the real Blue Dart sample contains internal reusable objects.</span><span class="finding"><span class="sev-high">FAIL</span> Image ops: No image/object draw operations were found, while the real Blue Dart sample draws internal objects on page.</span><span class="finding"><span class="sev-high">FAIL</span> TJ and Tj value: Tj Text Operator Count differs from real sample: got 49, real 0.</span><span class="finding"><span class="sev-high">FAIL</span> TJ and Tj value: TJ Text Operator Count differs from real sample: got 0, real 45.</span><span class="finding"><span class="sev-high">FAIL</span> TD/Tf/Tj value: Td/Tf/TJ grammar count differs from real sample: got 0, real 43.</span></td></tr><tr><td>Bluedart-script.pdf</td><td>Bluedart (matches expected bluedart)</td><td class="verdict suspicious">BLUE DART SUSPICIOUS</td><td>0</td><td>%PDF-1.3<br>offset=0<br>INFO; Header matches real sample: %PDF-1.3, offset=0.</td><td>count=1<br>after=1<br>INFO; EOF pattern matches real sample: count=1, after=1.</td><td>0<br>FAIL; No reusable XObjects were found, while the real Blue Dart sample contains internal reusable objects.</td><td>0<br>FAIL; No image/object draw operations were found, while the real Blue Dart sample draws internal objects on page.</td><td>ReportLab<br>INFO; Producer chain differs from real sample: got ReportLab, real iText -&gt; pdftk.</td><td>TJ=0<br>Tj=54<br>FAIL; Tj Text Operator Count differs from real sample: got 54, real 0. | FAIL; TJ Text Operator Count differs from real sample: got 0, real 45.</td><td>Td/Tf/TJ=0<br>FAIL; Td/Tf/TJ grammar count differs from real sample: got 0, real 43.</td><td>Tj/TJ mismatch; -24<br>INFO; Content grammar hash differs from real sample.<br><code>46f37bfb62c3c9c53ef68de20a11531b580b472919633c82555f0baf380d665f</code></td><td>0<br>INFO; /Prev count matches real sample: 0.</td><td>sequential 1-9; ids=1,2,3,4,5,6,7,8,9; deltas=1,1,1,1,1,1,1,1<br>FAIL; Object serialization differs from real sample: got sequential 1-9, real nonsequential.</td><td>same repeated twice; first=1ad323ff...aaa8a817; second=1ad323ff...aaa8a817<br>INFO; Document ID pattern differs from real sample: got same repeated twice, real two different IDs.</td><td>-<br>INFO; Page content compression differs from real sample: got -, real Flate.</td><td>ReportLab-generated comment<br>INFO; Trailer comment pattern differs from real sample: got ReportLab-generated comment, real ordinary trailer.</td><td>78645291304, 2408275931846 (Code 128)<br>INFO; Barcode count/format matches real sample: count=2, formats=Code 128.</td><td>all decoded values found in text<br>INFO; All decoded barcode values are present in extracted text.</td><td>decoded/text match; -0<br>INFO; decoded/text match; -0</td><td><span class="finding"><span class="sev-high">FAIL</span> Xobjects: No reusable XObjects were found, while the real Blue Dart sample contains internal reusable objects.</span><span class="finding"><span class="sev-high">FAIL</span> Image ops: No image/object draw operations were found, while the real Blue Dart sample draws internal objects on page.</span><span class="finding"><span class="sev-high">FAIL</span> TJ and Tj value: Tj Text Operator Count differs from real sample: got 54, real 0.</span><span class="finding"><span class="sev-high">FAIL</span> TJ and Tj value: TJ Text Operator Count differs from real sample: got 0, real 45.</span><span class="finding"><span class="sev-high">FAIL</span> TD/Tf/Tj value: Td/Tf/TJ grammar count differs from real sample: got 0, real 43.</span><span class="finding"><span class="sev-high">FAIL</span> Object serialization: Object serialization differs from real sample: got sequential 1-9, real nonsequential.</span></td></tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>

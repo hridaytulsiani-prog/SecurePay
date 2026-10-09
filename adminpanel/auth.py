@@ -7,7 +7,7 @@ separate Redis key prefix so admin and merchant sessions never collide.
 
 import secrets
 
-from django_redis import get_redis_connection
+from django.core.cache import cache
 
 TOKEN_TTL_SECONDS = 1800  # 30 minutes; refreshed on every authenticated request
 REDIS_PREFIX = "admin_session"
@@ -20,8 +20,7 @@ def _redis_key(token):
 def create_admin_session(user):
     """Issue a new opaque session token for a logged-in admin and store it in Redis."""
     token = secrets.token_urlsafe(32)
-    redis_conn = get_redis_connection("default")
-    redis_conn.setex(_redis_key(token), TOKEN_TTL_SECONDS, str(user.id))
+    cache.set(_redis_key(token), str(user.id), TOKEN_TTL_SECONDS)
     return token
 
 
@@ -30,11 +29,10 @@ def get_admin_user_id_from_token(auth_token):
     if not auth_token:
         return None
     try:
-        redis_conn = get_redis_connection("default")
-        user_id = redis_conn.get(_redis_key(auth_token))
+        user_id = cache.get(_redis_key(auth_token))
         if not user_id:
             return None
-        redis_conn.expire(_redis_key(auth_token), TOKEN_TTL_SECONDS)
+        cache.touch(_redis_key(auth_token), TOKEN_TTL_SECONDS)
         return int(user_id)
     except Exception:
         # Redis being unreachable should fail closed (treat as unauthenticated),
@@ -45,8 +43,7 @@ def get_admin_user_id_from_token(auth_token):
 def destroy_admin_session(auth_token):
     """Invalidate a session token immediately (used on logout)."""
     try:
-        redis_conn = get_redis_connection("default")
-        redis_conn.delete(_redis_key(auth_token))
+        cache.delete(_redis_key(auth_token))
     except Exception:
         pass
 

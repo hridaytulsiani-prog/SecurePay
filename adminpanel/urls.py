@@ -2,13 +2,51 @@
 # login/ requires a valid admin session token (see AdminAPIView).
 from django.urls import path
 
-from adminpanel.api.v1.auth_views import AdminLoginView, AdminLogoutView, AdminMeView
-from adminpanel.api.v1.orders_views import AdminOrderListView, AdminEnquiryListView
+from adminpanel.api.v1.auth_views import (
+    AdminAccountCreateView,
+    AdminAccountDetailView,
+    AdminAccountListView,
+    AdminLoginView,
+    AdminLogoutView,
+    AdminMeView,
+)
+from adminpanel.api.v1.orders_views import (
+    AdminMerchantListView,
+    AdminOrderListView,
+    AdminEnquiryListView,
+    AdminSuspiciousPdfListView,
+)
+from adminpanel.api.v1.omniware_oversight_views import (
+    OmniwareOversightReportView,
+    OmniwarePartnerLoginView,
+    OmniwarePartnerOversightReportView,
+)
 from adminpanel.api.v1.stats_views import AdminStatsView
+from adminpanel.api.v1.audit_views import AdminAuditLogListView
+from adminpanel.api.v1.decision_history_views import AdminDecisionHistoryListView
 from adminpanel.api.v1.enquiry_actions_views import (
     AdminEnquiryNoteListView,
     AdminEnquiryNoteDetailView,
     AdminEnquiryResolutionView,
+)
+from adminpanel.api.v1.courier_verification_views import (
+    AdminBlueDartOtpCheckView,
+    AdminDhlBlueDartOtpCheckView,
+    AdminBlueDartLabelOtpEvidenceView,
+    AdminBlueDartVerificationDecisionView,
+    AdminDelhiveryOtpCheckView,
+    AdminDelhiveryVerificationDecisionView,
+)
+from adminpanel.api.v1.pa_control_views import (
+    PACapabilityListView,
+    PAEvidenceReportView,
+    PAProtectedOrderActionView,
+    PAProtectedOrderListCreateView,
+)
+from adminpanel.api.v1.needs_attention_views import (
+    AdminNeedsAttentionDecisionView,
+    AdminNeedsAttentionPdfDecisionView,
+    AdminNeedsAttentionView,
 )
 
 urlpatterns = [
@@ -16,9 +54,58 @@ urlpatterns = [
     path("login/", AdminLoginView.as_view(), name="admin-login"),
     path("logout/", AdminLogoutView.as_view(), name="admin-logout"),
     path("me/", AdminMeView.as_view(), name="admin-me"),
+    path("accounts/create/", AdminAccountCreateView.as_view(), name="admin-account-create"),
+    path("accounts/", AdminAccountListView.as_view(), name="admin-account-list"),
+    path("accounts/<int:user_id>/", AdminAccountDetailView.as_view(), name="admin-account-detail"),
     # Read-only, cross-merchant listings
+    path("merchants/", AdminMerchantListView.as_view(), name="admin-merchants"),
     path("orders/", AdminOrderListView.as_view(), name="admin-orders"),
     path("enquiries/", AdminEnquiryListView.as_view(), name="admin-enquiries"),
+    path("suspicious-pdfs/", AdminSuspiciousPdfListView.as_view(), name="admin-suspicious-pdfs"),
+    path("aggregator-oversight/", OmniwareOversightReportView.as_view(), name="admin-aggregator-oversight"),
+    path("pa-control/capabilities/", PACapabilityListView.as_view(), name="admin-pa-capabilities"),
+    path("pa-control/orders/", PAProtectedOrderListCreateView.as_view(), name="admin-pa-orders"),
+    path("needs-attention/", AdminNeedsAttentionView.as_view(), name="admin-needs-attention"),
+    path(
+        "needs-attention/<str:vaultpay_order_id>/decision/",
+        AdminNeedsAttentionDecisionView.as_view(),
+        name="admin-needs-attention-decision",
+    ),
+    path(
+        "needs-attention/<str:vaultpay_order_id>/pdf-decision/",
+        AdminNeedsAttentionPdfDecisionView.as_view(),
+        name="admin-needs-attention-pdf-decision",
+    ),
+    path("pa-control/evidence/<str:token>/", PAEvidenceReportView.as_view(), name="pa-evidence-report"),
+    path(
+        "pa-control/orders/<str:vaultpay_order_id>/<str:action>/",
+        PAProtectedOrderActionView.as_view(),
+        name="admin-pa-order-action",
+    ),
+    path("partner/aggregator/login/", OmniwarePartnerLoginView.as_view(), name="aggregator-partner-login"),
+    path(
+        "partner/aggregator/oversight/",
+        OmniwarePartnerOversightReportView.as_view(),
+        name="aggregator-partner-oversight",
+    ),
+    path("courier-verification/delhivery/", AdminDelhiveryOtpCheckView.as_view(), name="admin-delhivery-otp-check"),
+    path(
+        "courier-verification/delhivery/decision/",
+        AdminDelhiveryVerificationDecisionView.as_view(),
+        name="admin-delhivery-verification-decision",
+    ),
+    path("courier-verification/bluedart/", AdminBlueDartOtpCheckView.as_view(), name="admin-bluedart-otp-check"),
+    path("courier-verification/dhl-bluedart/", AdminDhlBlueDartOtpCheckView.as_view(), name="admin-dhl-bluedart-otp-check"),
+    path(
+        "courier-verification/bluedart/label-otp-evidence/",
+        AdminBlueDartLabelOtpEvidenceView.as_view(),
+        name="admin-bluedart-label-otp-evidence",
+    ),
+    path(
+        "courier-verification/bluedart/decision/",
+        AdminBlueDartVerificationDecisionView.as_view(),
+        name="admin-bluedart-verification-decision",
+    ),
     # Per-enquiry notes log (add/edit/delete)
     path("enquiries/<int:enquiry_id>/notes/", AdminEnquiryNoteListView.as_view(), name="admin-enquiry-notes"),
     path(
@@ -33,4 +120,6 @@ urlpatterns = [
         name="admin-enquiry-resolution",
     ),
     path("stats/", AdminStatsView.as_view(), name="admin-stats"),
+    path("audit-logs/", AdminAuditLogListView.as_view(), name="admin-audit-logs"),
+    path("decision-history/", AdminDecisionHistoryListView.as_view(), name="admin-decision-history"),
 ]

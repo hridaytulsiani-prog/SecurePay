@@ -10,19 +10,34 @@ can be reused or unit-tested independently of the HTTP layer.
 import logging
 import os
 import re
+import shutil
 import tempfile
+import threading
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
 import fitz
+from django.conf import settings
+from django.utils.text import get_valid_filename
+from django.db.models import Q
 from PIL import Image
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .color_parser import extract_major_colors_from_pdf
 from .label_validator import validate_label
+from label_bluedart_check import check_bluedart_pdf
+from label_delhivery_check import check_delhivery_pdf
+from label_dtdc_check import check_dtdc_pdf
+from label_ekart_check import check_ekart_pdf
+from label_shadowfax_check import check_shadowfax_pdf
+from label_shiprocket_check import check_shiprocket_pdf
+from label_xpressbees_check import check_xpressbees_pdf
+from payments.auth import get_merchant_id_from_token
 from payments.models import OrderInfo
+from payments.models.merchantinfo import MerchantInfo
 from tracking.models.trackinginfo import Shipment
+from tracking.models.pdf_validation import PdfValidationRecord
 
 try:
     from pyzbar.pyzbar import decode as zbar_decode
@@ -33,6 +48,43 @@ except Exception:
     zbar_decode = None
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_COURIER_NAMES = [
+    "Blue Dart",
+    "Delhivery",
+    "DTDC",
+    "Ekart",
+    "Shadowfax",
+    "Shiprocket",
+    "Xpressbees",
+]
+
+SUPPORTED_COURIER_ALIASES = {
+    "Blue Dart": ("blue dart", "bluedart"),
+    "Delhivery": ("delhivery",),
+    "DTDC": ("dtdc",),
+    "Ekart": ("ekart",),
+    "Shadowfax": ("shadowfax",),
+    "Shiprocket": ("shiprocket",),
+    "Xpressbees": ("xpressbees", "xpress bees"),
+}
+
+MERCHANT_COURIER_KEY_ALIASES = {
+    "blue_dart": ("blue dart", "bluedart"),
+    "delhivery": ("delhivery",),
+    "dtdc": ("dtdc",),
+    "ekart": ("ekart",),
+    "shadowfax": ("shadowfax",),
+    "shiprocket": ("shiprocket",),
+    "xpressbees": ("xpressbees", "xpress bees"),
+}
+
+
+def _get_auth_token_from_request(request):
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return request.GET.get("auth_token")
 
 
 @dataclass
@@ -87,6 +139,20 @@ COURIER_KEYWORDS = {
     "ekart": ["ekart"],
 }
 
+# SecurePay currently supports prepaid shipments only. Keep these patterns
+# focused on payment-mode language so a normal order/customer name containing
+# the letters "cod" is not rejected accidentally.
+COD_LABEL_PATTERNS = (
+    re.compile(r"\bcash\s+on\s+delivery\b", re.I),
+    re.compile(r"\bcollect\s+on\s+delivery\b", re.I),
+    re.compile(r"(?<![A-Za-z])C[.\s-]*O[.\s-]*D(?![A-Za-z])", re.I),
+)
+
+
+def label_indicates_cod(raw_text: str) -> bool:
+    """Return whether extracted label text identifies a COD shipment."""
+    return any(pattern.search(raw_text or "") for pattern in COD_LABEL_PATTERNS)
+
 
 # Colors sampled from a genuine Delhivery label (grey packaging tones +
 # accent red). Used as a fallback courier fingerprint when the label
@@ -104,8 +170,31 @@ SHIPROCKET_FINGERPRINT_COLORS = {
 # Minimum number of page-color hits against DELHIVERY_FINGERPRINT_COLORS
 # before we're confident enough to label the courier "Delhivery" purely
 # from color, rather than from text/logo detection in validate_label().
-DELHIVERY_COLOR_MATCH_THRESHOLD = 6
+DELHIVERY_COLOR_MATCH_THRESHOLD = 4
 SHIPROCKET_COLOR_MATCH_THRESHOLD = 6
+DELHIVERY_COLOR_DISTANCE_TOLERANCE = 30
+
+
+def _hex_to_rgb(hex_value: str) -> tuple[int, int, int]:
+    value = hex_value.lstrip("#")
+    return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+
+
+def _is_near_fingerprint_color(hex_value: str, fingerprint_colors: set[str], tolerance: int) -> bool:
+    try:
+        red, green, blue = _hex_to_rgb(hex_value)
+    except Exception:
+        return False
+
+    for fingerprint in fingerprint_colors:
+        target_red, target_green, target_blue = _hex_to_rgb(fingerprint)
+        if (
+            abs(red - target_red) <= tolerance
+            and abs(green - target_green) <= tolerance
+            and abs(blue - target_blue) <= tolerance
+        ):
+            return True
+    return False
 
 
 class PDFValidator(APIView):
@@ -124,7 +213,136 @@ class PDFValidator(APIView):
          flagged for manual review.
     """
 
+    @staticmethod
+    def _is_supported_courier(delivery_partner="", courier_partner="", raw_text=""):
+        haystack = " ".join([
+            delivery_partner or "",
+            courier_partner or "",
+            raw_text or "",
+        ]).lower()
+        return any(
+            alias in haystack
+            for aliases in SUPPORTED_COURIER_ALIASES.values()
+            for alias in aliases
+        )
+
+    @staticmethod
+    def _unsupported_courier_response(delivery_partner="", courier_partner=""):
+        detected_courier = courier_partner if courier_partner and courier_partner != "Unknown" else delivery_partner
+        if not detected_courier or detected_courier == "Unknown":
+            detected_courier = "Unknown"
+
+        return Response({
+            "error": (
+                "Unsupported courier service. SecurePay currently accepts shipment labels only "
+                "from Blue Dart, Delhivery, DTDC, Ekart, Shadowfax, Shiprocket, and Xpressbees."
+            ),
+            "detected_courier": detected_courier,
+            "supported_couriers": SUPPORTED_COURIER_NAMES,
+        }, status=422)
+
+    @staticmethod
+    def _courier_key(value=""):
+        normalized = re.sub(r"[^a-z0-9]", "", (value or "").lower())
+        for key, aliases in MERCHANT_COURIER_KEY_ALIASES.items():
+            if any(re.sub(r"[^a-z0-9]", "", alias) in normalized for alias in aliases):
+                return key
+        return None
+
+    @classmethod
+    def _configured_courier_key(cls, delivery_partner="", courier_partner=""):
+        # For marketplace labels, courier_partner is the actual last-mile
+        # carrier inside the outer label (for example Blue Dart inside
+        # Shiprocket). That is the partner the merchant must have enabled.
+        for candidate in (courier_partner, delivery_partner):
+            if candidate and candidate != "Unknown":
+                key = cls._courier_key(candidate)
+                if key:
+                    return key
+        return None
+
+    @staticmethod
+    def _merchant_courier_not_configured_response(merchant_id, delivery_partner="", courier_partner=""):
+        try:
+            merchant = MerchantInfo.objects.get(id=merchant_id)
+        except MerchantInfo.DoesNotExist:
+            return None
+
+        preferences = merchant.courier_preferences or {}
+        configured_keys = preferences.get("couriers") if isinstance(preferences, dict) else []
+        configured_keys = configured_keys if isinstance(configured_keys, list) else []
+        detected_key = PDFValidator._configured_courier_key(delivery_partner, courier_partner)
+        if not detected_key or detected_key in configured_keys:
+            return None
+
+        label = next((name for key, name in zip(
+            ("blue_dart", "delhivery", "dtdc", "ekart", "shadowfax", "shiprocket", "xpressbees"),
+            SUPPORTED_COURIER_NAMES,
+        ) if key == detected_key), detected_key)
+        configured_names = [
+            name for key, name in zip(
+                ("blue_dart", "delhivery", "dtdc", "ekart", "shadowfax", "shiprocket", "xpressbees"),
+                SUPPORTED_COURIER_NAMES,
+            ) if key in configured_keys
+        ]
+        selected_text = ", ".join(configured_names) if configured_names else "no courier partners"
+        return Response({
+            "error": (
+                f"{label} label rejected. Your SecurePay account supports {selected_text}. "
+                f"Add {label} in Courier Settings before uploading this label."
+            ),
+            "code": "COURIER_NOT_CONFIGURED",
+            "detected_courier": label,
+            "configured_couriers": configured_names,
+        }, status=422)
+
+    @staticmethod
+    def _cod_not_supported_response():
+        return Response({
+            "error": (
+                "Cash on Delivery (COD) shipment labels are not supported by SecurePay. "
+                "Please upload a prepaid shipment label."
+            ),
+            "code": "COD_NOT_SUPPORTED",
+        }, status=422)
+
+    @staticmethod
+    def _serialize_record(record, mask_for_merchant=True):
+        status = "under_review" if mask_for_merchant else record.status
+        verdict = None if mask_for_merchant else record.verdict
+        risk_verdict = None if mask_for_merchant else record.risk_verdict
+        return {
+            "id": record.id,
+            "file_name": record.file_name,
+            "status": status,
+            "verdict": verdict,
+            "risk_verdict": risk_verdict,
+            "score": 0 if mask_for_merchant else record.score,
+            "risk_score": 0 if mask_for_merchant else record.risk_score,
+            "delivery_partner": record.delivery_partner,
+            "courier_partner": record.courier_partner,
+            "awb": record.awb,
+            "order_id": record.order_id,
+            "uploaded_at": record.uploaded_at.isoformat(),
+        }
+
+    def get(self, request):
+        auth_token = _get_auth_token_from_request(request)
+        merchant_id = get_merchant_id_from_token(auth_token)
+        if merchant_id is None:
+            return Response({"error": "Invalid or expired merchant token"}, status=401)
+
+        records = PdfValidationRecord.objects.filter(merchant_id=merchant_id)[:50]
+        return Response({
+            "results": [self._serialize_record(record) for record in records]
+        })
+
     def post(self, request):
+        auth_token = _get_auth_token_from_request(request)
+        merchant_id = get_merchant_id_from_token(auth_token)
+        if merchant_id is None:
+            return Response({"error": "Invalid or expired merchant token"}, status=401)
+
         pdf_file = request.FILES.get("file")
         if not pdf_file:
             return Response({"error": "No file provided"}, status=400)
@@ -132,29 +350,113 @@ class PDFValidator(APIView):
         if not pdf_file.name.lower().endswith(".pdf"):
             return Response({"error": "Only PDF files are allowed"}, status=400)
 
-        temp_path = None
-        try:
-            # Uploaded file is streamed to disk since both the label parser
-            # and the risk analyzer (fitz) need a real file path, not a
-            # Django file-like object.
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-                for chunk in pdf_file.chunks():
-                    temp_pdf.write(chunk)
-                temp_path = temp_pdf.name
+        if PdfValidationRecord.objects.filter(merchant_id=merchant_id, file_name=pdf_file.name).exists():
+            return Response({"error": "This PDF is already uploaded."}, status=409)
 
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            for chunk in pdf_file.chunks():
+                temp_pdf.write(chunk)
+            temp_path = temp_pdf.name
+
+        try:
+            parsed_result = validate_label(temp_path)
+            if label_indicates_cod(parsed_result.raw_text):
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return self._cod_not_supported_response()
+
+            delivery_partner = parsed_result.delivery_partner
+            self.from_color = False
+            if not delivery_partner:
+                delivery_partner, self.from_color = self._detect_courier_from_color(temp_path)
+            courier_partner, _ = self.detect_courier_partner_from_color(temp_path, parsed_result.raw_text)
+            if courier_partner == "Unknown" and delivery_partner:
+                courier_partner = delivery_partner
+            if not self._is_supported_courier(delivery_partner, courier_partner, parsed_result.raw_text):
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return self._unsupported_courier_response(delivery_partner, courier_partner)
+            courier_settings_error = self._merchant_courier_not_configured_response(
+                merchant_id, delivery_partner, courier_partner
+            )
+            if courier_settings_error:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return courier_settings_error
+            parsed_order_id = self.get_order_id(
+                delivery_partner,
+                parsed_result.raw_text,
+                parsed_result.barcodes,
+                courier_partner,
+            )
+        except Exception:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            return Response({"error": "This PDF could not be read as a supported shipment label."}, status=422)
+
+        order_exists = False
+        if parsed_order_id:
+            order_exists = OrderInfo.objects.filter(merchant_id=merchant_id).filter(
+                Q(merchant_order_id=parsed_order_id) | Q(pa_order_id=parsed_order_id)
+            ).exists()
+
+        if not order_exists:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            return Response({
+                "error": "This PDF is not relevant to SecurePay. No matching order ID exists for this merchant.",
+                "order_id": parsed_order_id,
+            }, status=422)
+
+        record = PdfValidationRecord.objects.create(
+            merchant_id=merchant_id,
+            file_name=pdf_file.name,
+            status="processing",
+            verdict="CHECKING",
+            details={"processing": True},
+        )
+
+        threading.Thread(
+            target=self._process_pdf_record,
+            args=(record.id, temp_path, merchant_id),
+            daemon=True,
+        ).start()
+
+        return Response({
+            "queued": True,
+            "upload_record": self._serialize_record(record),
+        }, status=202)
+
+    def _process_pdf_record(self, record_id: int, temp_path: str, merchant_id: int):
+        try:
             result = validate_label(temp_path)
             logger.info("Label validation result: %s", result)
 
-            # Courier wasn't identified from text/logo - try a color-based
-            # fallback before giving up and reporting "Unknown".
             delivery_partner = result.delivery_partner
             self.from_color = False
             if not delivery_partner:
                 delivery_partner, self.from_color = self._detect_courier_from_color(temp_path)
 
             courier_partner, _ = self.detect_courier_partner_from_color(temp_path, result.raw_text)
-            # print(result.raw_text)
-            order_id = self.get_order_id(delivery_partner, result.raw_text, result.barcodes)
+            if courier_partner == "Unknown" and delivery_partner:
+                courier_partner = delivery_partner
+            if not self._is_supported_courier(delivery_partner, courier_partner, result.raw_text):
+                PdfValidationRecord.objects.filter(id=record_id, merchant_id=merchant_id).update(
+                    status="not_approved",
+                    verdict="UNSUPPORTED COURIER",
+                    delivery_partner=delivery_partner,
+                    courier_partner=courier_partner,
+                    details={
+                        "processing": False,
+                        "error": (
+                            "Unsupported courier service. SecurePay currently accepts shipment labels only "
+                            "from Blue Dart, Delhivery, DTDC, Ekart, Shadowfax, Shiprocket, and Xpressbees."
+                        ),
+                        "supported_couriers": SUPPORTED_COURIER_NAMES,
+                    },
+                )
+                return
+            order_id = self.get_order_id(delivery_partner, result.raw_text, result.barcodes, courier_partner)
 
             analysis = analyze_shipping_label_pdf(
                 temp_path,
@@ -163,9 +465,6 @@ class PDFValidator(APIView):
             )
             logger.info("Risk analysis: %s", analysis)
 
-            # Link the AWB to a Shipment record (creating one if this AWB
-            # hasn't been seen before), then attach that shipment to the
-            # merchant's order if we could resolve one.
             shipment = None
             if result.awb:
                 try:
@@ -178,33 +477,154 @@ class PDFValidator(APIView):
                 shipment.save()
 
             if order_id and shipment:
-                order = OrderInfo.objects.filter(merchant_order_id=order_id).first()
+                order = OrderInfo.objects.filter(merchant_id=merchant_id).filter(
+                    Q(merchant_order_id=order_id) | Q(pa_order_id=order_id)
+                ).first()
                 if order:
                     order.shipment_id = shipment
-                    order.save()
+                    order.save(update_fields=["shipment_id"])
 
-            final_response = {
-                "delivery_partner": delivery_partner,
-                'courier_partner': courier_partner,
-                "awb": result.awb,
-                "is_valid": result.is_authentic,
+            courier_name = (delivery_partner or "").lower()
+            courier_partner_name = (courier_partner or "").lower()
+            forgery_result = None
+            courier_checks = [
+                (("blue dart", "bluedart"), check_bluedart_pdf),
+                (("delhivery",), check_delhivery_pdf),
+                (("xpressbees", "xpress bees"), check_xpressbees_pdf),
+                (("ekart",), check_ekart_pdf),
+                (("shadowfax",), check_shadowfax_pdf),
+                (("dtdc",), check_dtdc_pdf),
+            ]
+
+            if "shiprocket" in courier_partner_name:
+                forgery_result = check_shiprocket_pdf(temp_path)
+            else:
+                for names, checker in courier_checks:
+                    if any(name in courier_name for name in names):
+                        forgery_result = checker(temp_path)
+                        break
+
+            if forgery_result:
+                approved = "PASSED" in (forgery_result.get("verdict") or "")
+                forgery_verdict = forgery_result.get("verdict")
+                label_score = forgery_result.get("score") or 0
+                risk_score = forgery_result.get("failed_gate_count") or 0
+                risk_verdict = None
+            else:
+                approved = result.is_authentic
+                forgery_verdict = result.verdict
+                label_score = result.score
+                risk_score = analysis.get("score") or 0
+                risk_verdict = analysis.get("verdict")
+
+            stored_pdf = None
+            if not approved:
+                stored_pdf = self._store_suspicious_pdf(temp_path, merchant_id, record_id)
+
+            details = {
+                "processing": False,
                 "result": result.to_dict(),
-                "order_id": order_id,
                 "risk_analysis": analysis,
-                "flagged_for_review": analysis.get("verdict") in ("needs_review", "highly_suspicious"),
+                "forgery_result": forgery_result,
             }
+            if stored_pdf:
+                details["stored_pdf"] = stored_pdf
 
-            return Response(final_response)
-
+            PdfValidationRecord.objects.filter(id=record_id, merchant_id=merchant_id).update(
+                status="approved" if approved else "not_approved",
+                verdict=forgery_verdict,
+                risk_verdict=risk_verdict,
+                score=label_score,
+                risk_score=risk_score,
+                delivery_partner=delivery_partner,
+                courier_partner=courier_partner,
+                awb=result.awb,
+                order_id=order_id,
+                details=details,
+            )
         except Exception as exc:
-            # Deliberately vague to the client - internal parsing/analysis
-            # failures shouldn't leak stack traces or file details.
-            logger.exception("PDF validation failed: %s", exc)
-            return Response({"error": "Unable to process this file."}, status=400)
-
+            logger.exception("PDF validation failed for record %s: %s", record_id, exc)
+            stored_pdf = self._store_suspicious_pdf(temp_path, merchant_id, record_id)
+            details = {"processing": False, "error": "Unable to process this file."}
+            if stored_pdf:
+                details["stored_pdf"] = stored_pdf
+            PdfValidationRecord.objects.filter(id=record_id, merchant_id=merchant_id).update(
+                status="not_approved",
+                verdict="PROCESSING FAILED",
+                details=details,
+            )
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    @staticmethod
+    def _store_suspicious_pdf(temp_path: str, merchant_id: int, record_id: int) -> Optional[str]:
+        if not temp_path or not os.path.exists(temp_path):
+            return None
+
+        record = PdfValidationRecord.objects.filter(id=record_id, merchant_id=merchant_id).first()
+        original_name = record.file_name if record else f"record_{record_id}.pdf"
+        safe_name = get_valid_filename(original_name) or f"record_{record_id}.pdf"
+        relative_dir = os.path.join("suspicious_pdfs", f"merchant_{merchant_id}")
+        absolute_dir = os.path.join(settings.MEDIA_ROOT, relative_dir)
+        os.makedirs(absolute_dir, exist_ok=True)
+
+        relative_path = os.path.join(relative_dir, f"{record_id}_{safe_name}")
+        absolute_path = os.path.join(settings.MEDIA_ROOT, relative_path)
+        shutil.copyfile(temp_path, absolute_path)
+        return relative_path.replace(os.sep, "/")
+
+    def delete(self, request):
+        auth_token = _get_auth_token_from_request(request)
+        merchant_id = get_merchant_id_from_token(auth_token)
+        if merchant_id is None:
+            return Response({"error": "Invalid or expired merchant token"}, status=401)
+
+        record_id = request.GET.get("id") or request.data.get("id")
+        if not record_id:
+            return Response({"error": "PDF record id is required"}, status=400)
+
+        record = PdfValidationRecord.objects.filter(id=record_id, merchant_id=merchant_id).first()
+        if not record:
+            return Response({"error": "PDF record not found"}, status=404)
+
+        removed_awb = record.awb
+        removed_order_id = record.order_id
+        shipment = Shipment.objects.filter(awb=removed_awb).first() if removed_awb else None
+
+        orders = OrderInfo.objects.filter(merchant_id=merchant_id)
+        if removed_order_id:
+            orders = orders.filter(Q(merchant_order_id=removed_order_id) | Q(pa_order_id=removed_order_id))
+        elif shipment:
+            orders = orders.filter(shipment_id=shipment)
+        else:
+            orders = OrderInfo.objects.none()
+
+        unlinked_count = 0
+        for order in orders:
+            if order.shipment_id_id and (not shipment or order.shipment_id_id == shipment.id):
+                order.shipment_id = None
+                order.save(update_fields=["shipment_id"])
+                unlinked_count += 1
+
+        deleted_shipment = False
+        if shipment and not OrderInfo.objects.filter(shipment_id=shipment).exists():
+            shipment.delete()
+            deleted_shipment = True
+
+        stored_pdf = (record.details or {}).get("stored_pdf")
+        if stored_pdf:
+            stored_pdf_path = os.path.join(settings.MEDIA_ROOT, stored_pdf)
+            if os.path.exists(stored_pdf_path):
+                os.remove(stored_pdf_path)
+
+        record.delete()
+        return Response({
+            "ok": True,
+            "deleted_record_id": record_id,
+            "unlinked_orders": unlinked_count,
+            "deleted_shipment": deleted_shipment,
+        })
 
     @staticmethod
     def detect_courier_partner_from_color(temp_path: str, raw_text) -> "tuple[str, bool]":
@@ -223,7 +643,6 @@ class PDFValidator(APIView):
             for color in page.get("colors", [])
             if color["hex"].lower() in SHIPROCKET_FINGERPRINT_COLORS
         )
-        print(match_count,color_result)
         if match_count > SHIPROCKET_COLOR_MATCH_THRESHOLD:
             return "Shiprocket", True
         return "Unknown", False
@@ -241,20 +660,40 @@ class PDFValidator(APIView):
             1
             for page in color_result.get("all_pages", [])
             for color in page.get("colors", [])
-            if color["hex"].lower() in DELHIVERY_FINGERPRINT_COLORS
+            if _is_near_fingerprint_color(
+                color["hex"].lower(),
+                DELHIVERY_FINGERPRINT_COLORS,
+                DELHIVERY_COLOR_DISTANCE_TOLERANCE,
+            )
         )
 
-        if match_count > DELHIVERY_COLOR_MATCH_THRESHOLD:
+        if match_count >= DELHIVERY_COLOR_MATCH_THRESHOLD:
             return "Delhivery", True
         return "Unknown", False
 
-    def get_order_id(self, delivery_partner: str, raw_text: str, barcodes: List[str]) -> Optional[str]:
+    def get_order_id(
+        self,
+        delivery_partner: str,
+        raw_text: str,
+        barcodes: List[str],
+        courier_partner: str = "",
+    ) -> Optional[str]:
         """Extract the merchant's order id from the label, courier by courier.
 
         Each courier lays out its order id differently - some only expose it
         as a secondary barcode, others print it as labeled text - so this is
         a plain dispatch table rather than one general-purpose pattern.
         """
+        if "shiprocket" in (courier_partner or "").lower() or "shiprocket" in (raw_text or "").lower():
+            patterns = [
+                r"\bOrder\s*#\s*:?\s*([A-Za-z0-9][A-Za-z0-9-]{1,63})\b",
+                r"\bOrder\s*(?:Id|ID|No\.?|Number)\s*#?\s*:?\s*([A-Za-z0-9][A-Za-z0-9-]{1,63})\b",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, raw_text or "", re.IGNORECASE)
+                if match:
+                    return match.group(1)
+
         if "Delhivery" in delivery_partner:
             # When the courier was identified via color rather than logo/text
             # (self.from_color), the first barcode tends to be a different

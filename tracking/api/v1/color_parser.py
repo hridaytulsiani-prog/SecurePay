@@ -131,6 +131,3 @@ def extract_major_colors_from_pdf(
 #     for color in page["colors"]:
 #         print(color)
 
-# print("\nCombined major colors:")
-# for color in result["combined_major_colors"]:
-#     print(color)

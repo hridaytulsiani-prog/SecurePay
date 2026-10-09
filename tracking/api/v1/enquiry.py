@@ -21,6 +21,7 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from payments.models import EnquiryData
+from payments.services.decision_history import add_decision_history
 from tracking.signing import verify_order_signature
 
 VALID_RECEIPT_STATUSES = {choice for choice, _ in EnquiryData.RECEIPT_STATUS_CHOICES}
@@ -72,6 +73,33 @@ class SubmitEnquiry(APIView):
             otp_shared=_parse_bool(request.data.get('otp_shared')),
             unboxing_evidence=_parse_bool(request.data.get('unboxing_evidence')),
             evidence_file=request.FILES.get('evidence_file'),
+        )
+        add_decision_history(
+            case_type="enquiry",
+            case_id=enquiry.enquiry_id,
+            order_id=enquiry.order_id,
+            status="created",
+            title="Enquiry Created",
+            remarks="Customer enquiry case created.",
+            actor_display="customer",
+            actor_role="Customer",
+            metadata={"receipt_status": receipt_status},
+        )
+        add_decision_history(
+            case_type="enquiry",
+            case_id=enquiry.enquiry_id,
+            order_id=enquiry.order_id,
+            status="submitted",
+            title="Submitted For Review",
+            remarks=enquiry_text,
+            actor_display="customer",
+            actor_role="Customer",
+            metadata={
+                "receipt_status": receipt_status,
+                "agent_contacted": enquiry.agent_contacted,
+                "otp_shared": enquiry.otp_shared,
+                "unboxing_evidence": enquiry.unboxing_evidence,
+            },
         )
 
         return Response({"message": "Enquiry submitted successfully.", "enquiry_id": enquiry.enquiry_id}, status=status.HTTP_201_CREATED)

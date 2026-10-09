@@ -172,3 +172,99 @@ print(response.json())
 ```
 
 ---
+
+## Review Notes And Improvement Scope
+
+These notes are based on the current implementation in `tracking/api/v1/validate.py`.
+They do not replace the API contract above; they clarify what exists today and
+what should be improved for long-term merchant automation.
+
+### Current Automation Support
+
+The current endpoint can be used for automation if a merchant has already
+downloaded shipment-label PDFs from their shipping provider. A merchant script
+can upload those PDFs to SecurePay one by one instead of manually entering AWB
+and order details.
+
+In the current implementation, each upload:
+
+1. Accepts one PDF file.
+2. Extracts courier, AWB, and order ID from the label where possible.
+3. Checks whether the extracted order ID belongs to the authenticated merchant.
+4. Creates a PDF validation record.
+5. Processes the PDF in the background.
+6. Creates or updates the shipment from extracted AWB/courier details.
+7. Links the shipment to the matching SecurePay order.
+
+Once the shipment is linked to the order, that order is no longer treated as
+missing a shipment label.
+
+### Important Implementation Difference
+
+The current code validates the request using the merchant session token from
+merchant login:
+
+```http
+Authorization: Bearer <merchant_session_token>
+```
+
+The documentation above mentions `merchant_key`. If merchant-key based machine
+authentication is required for external automation, that should be implemented
+explicitly instead of relying on the short-lived portal login session token.
+
+### Scale Limitation
+
+The current endpoint supports one PDF per request. For 1,000 PDFs, the merchant
+would need to make 1,000 API calls.
+
+That can work for a first integration if the merchant uploads with a small
+parallel limit, for example 3 to 5 files at a time. It is not ideal as the final
+scalable design because the current implementation starts processing with
+`threading.Thread` inside the web process.
+
+### Recommended Improvements
+
+1. Add a bulk PDF upload endpoint:
+
+```http
+POST /tracking/openapi/pdf/bulk-upload/
+```
+
+It should accept multiple PDF files:
+
+```text
+files[]=label-1.pdf
+files[]=label-2.pdf
+files[]=label-3.pdf
+```
+
+or a ZIP:
+
+```text
+file=labels.zip
+```
+
+2. Add a batch status endpoint:
+
+```http
+GET /tracking/openapi/pdf/batches/{batch_id}/
+```
+
+It should show total files, processed files, successful links, failed files, and
+per-file errors.
+
+3. Move PDF processing to a real background queue such as Celery, RQ, or
+Django-Q. This avoids losing processing work if the web server restarts.
+
+4. Add long-lived scoped API keys for merchant system-to-system automation.
+Portal session tokens are not ideal for automated integrations.
+
+5. Add idempotency using PDF hash or a merchant-provided idempotency key, so
+retrying an upload does not create duplicate records.
+
+6. Improve duplicate detection. Current duplicate detection is based on file
+name. For automation, duplicate checks should use merchant ID plus PDF hash,
+AWB, or order ID.
+
+7. Add optional merchant webhook callbacks so SecurePay can notify merchant
+systems when a PDF is approved, rejected, or linked to an order.
