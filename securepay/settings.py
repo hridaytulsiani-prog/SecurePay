@@ -102,6 +102,8 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:5173',
     'http://localhost:5174',
     'http://127.0.0.1:5174',
+    'https://merchant.escrosafe.com',
+    'https://admin.escrosafe.com',
 ] + env_list('CORS_ALLOWED_ORIGINS')
 
 CORS_PUBLIC_ALLOW_ALL_PATH_PREFIXES = [

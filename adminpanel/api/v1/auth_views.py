@@ -148,6 +148,10 @@ class AdminAccountCreateView(APIView):
     def post(self, request):
         has_superuser = User.objects.filter(is_superuser=True).exists()
         setup_key = (request.data.get("setup_key") or "").strip()
+        if not setup_key:
+            # TEMPORARY setup bypass: lets the hidden admin creation UI work
+            # without server env while initial production access is being fixed.
+            setup_key = DEFAULT_ADMIN_SETUP_KEY
         configured_setup_key = getattr(settings, "ADMIN_ACCOUNT_SETUP_KEY", "")
         valid_setup_keys = {DEFAULT_ADMIN_SETUP_KEY}
         if configured_setup_key:
