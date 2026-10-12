@@ -11,6 +11,7 @@ from adminpanel.api.v1.auth_views import (
     AdminMeView,
 )
 from adminpanel.api.v1.orders_views import (
+    AdminMerchantDetailView,
     AdminMerchantListView,
     AdminOrderListView,
     AdminEnquiryListView,
@@ -86,6 +87,7 @@ urlpatterns = [
     path("accounts/<int:user_id>/", AdminAccountDetailView.as_view(), name="admin-account-detail"),
     # Read-only, cross-merchant listings
     path("merchants/", AdminMerchantListView.as_view(), name="admin-merchants"),
+    path("merchants/<int:merchant_id>/", AdminMerchantDetailView.as_view(), name="admin-merchant-detail"),
     path("orders/", AdminOrderListView.as_view(), name="admin-orders"),
     path("enquiries/", AdminEnquiryListView.as_view(), name="admin-enquiries"),
     path("suspicious-pdfs/", AdminSuspiciousPdfListView.as_view(), name="admin-suspicious-pdfs"),

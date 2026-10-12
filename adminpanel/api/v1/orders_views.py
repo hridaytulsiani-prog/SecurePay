@@ -12,6 +12,7 @@ from django.db.models import Q
 from django.utils.dateparse import parse_date
 
 from rest_framework.views import Response
+from rest_framework import status
 
 from adminpanel.permissions import AdminAPIView
 from payments.models.merchantinfo import MerchantInfo
@@ -236,6 +237,26 @@ class AdminMerchantListView(AdminAPIView):
                 ).lower()
             ]
         return Response({"results": merchants})
+
+
+class AdminMerchantDetailView(AdminAPIView):
+    """Owner-only merchant deletion.
+
+    Deleting MerchantInfo intentionally cascades merchant-owned orders,
+    checkout sessions, notifications, and uploaded label records through the
+    model relationships.
+    """
+    required_permission = "users.manage"
+
+    def delete(self, request, merchant_id):
+        try:
+            merchant = MerchantInfo.objects.get(id=merchant_id)
+        except MerchantInfo.DoesNotExist:
+            return Response({"error": "Merchant not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        merchant_name = merchant.merchant_name
+        merchant.delete()
+        return Response({"deleted": True, "merchant_name": merchant_name}, status=status.HTTP_200_OK)
 
 
 class AdminEnquiryListView(AdminAPIView):
