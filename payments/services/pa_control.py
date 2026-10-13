@@ -1,4 +1,5 @@
 from decimal import Decimal
+import re
 from uuid import uuid4
 
 from django.db import IntegrityError, transaction
@@ -23,11 +24,30 @@ from tracking.models.delhivery_verification_decision import DelhiveryVerificatio
 
 
 PDF_UPLOAD_REFUND_DEADLINE_DAYS = 21
+SHIPROCKET_ALIASES = ("shiprocket", "ship rocket")
 
 
 def ensure_default_capabilities():
     for item in list_adapter_capabilities():
         PAProviderCapability.objects.update_or_create(provider=item["provider"], defaults=item)
+
+
+def _has_shiprocket(value=""):
+    normalized = re.sub(r"[^a-z0-9]", "", (value or "").lower())
+    return any(re.sub(r"[^a-z0-9]", "", alias) in normalized for alias in SHIPROCKET_ALIASES)
+
+
+def _resolve_pdf_label_partners(record):
+    delivery_partner = record.delivery_partner or ""
+    courier_partner = record.courier_partner or ""
+    raw_text = (((record.details or {}).get("result") or {}).get("raw_text") or "")
+    if courier_partner and _has_shiprocket(courier_partner) and delivery_partner and not _has_shiprocket(delivery_partner):
+        return "Shiprocket", delivery_partner
+    if raw_text and _has_shiprocket(raw_text) and delivery_partner and not _has_shiprocket(delivery_partner):
+        return "Shiprocket", delivery_partner
+    if courier_partner == "Unknown" and delivery_partner:
+        return delivery_partner, delivery_partner
+    return delivery_partner, courier_partner
 
 
 def audit(protected_order, event_type, message, details=None):
@@ -841,6 +861,8 @@ def get_pdf_evidence(protected_order):
     if shipment_awb and record.awb:
         awb_match = "PASSED" if shipment_awb == record.awb else "FAILED"
 
+    delivery_partner, courier_partner = _resolve_pdf_label_partners(record)
+
     return {
         "available": True,
         "record_id": record.id,
@@ -850,8 +872,8 @@ def get_pdf_evidence(protected_order):
         "risk_verdict": record.risk_verdict or "",
         "score": record.score,
         "risk_score": record.risk_score,
-        "delivery_partner": record.delivery_partner or "",
-        "courier_partner": record.courier_partner or "",
+        "delivery_partner": delivery_partner,
+        "courier_partner": courier_partner,
         "awb": record.awb or "",
         "order_id": record.order_id or "",
         "awb_match": awb_match,

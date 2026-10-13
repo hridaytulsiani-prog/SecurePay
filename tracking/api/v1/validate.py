@@ -249,6 +249,38 @@ class PDFValidator(APIView):
                 return key
         return None
 
+    @staticmethod
+    def _has_courier(value="", courier_key=""):
+        normalized = re.sub(r"[^a-z0-9]", "", (value or "").lower())
+        aliases = MERCHANT_COURIER_KEY_ALIASES.get(courier_key, ())
+        return any(re.sub(r"[^a-z0-9]", "", alias) in normalized for alias in aliases)
+
+    @classmethod
+    def _resolve_label_partners(cls, delivery_partner="", courier_partner=""):
+        """Keep marketplace labels split as outer platform + last-mile courier.
+
+        Example: a Shiprocket label delivered by Delhivery should be stored as
+        delivery_partner=Shiprocket and courier_partner=Delhivery. Without this,
+        the merchant dashboard can show Delhivery in both columns.
+        """
+        if cls._has_courier(courier_partner, "shiprocket") and delivery_partner and not cls._has_courier(delivery_partner, "shiprocket"):
+            return "Shiprocket", delivery_partner
+        if courier_partner == "Unknown" and delivery_partner:
+            return delivery_partner, delivery_partner
+        return delivery_partner, courier_partner
+
+    @classmethod
+    def _resolve_label_partners_from_text(cls, delivery_partner="", courier_partner="", raw_text=""):
+        delivery_partner, courier_partner = cls._resolve_label_partners(delivery_partner, courier_partner)
+        if (
+            raw_text
+            and cls._has_courier(raw_text, "shiprocket")
+            and delivery_partner
+            and not cls._has_courier(delivery_partner, "shiprocket")
+        ):
+            return "Shiprocket", delivery_partner
+        return delivery_partner, courier_partner
+
     @classmethod
     def _configured_courier_key(cls, delivery_partner="", courier_partner=""):
         # For marketplace labels, courier_partner is the actual last-mile
@@ -306,11 +338,17 @@ class PDFValidator(APIView):
             "code": "COD_NOT_SUPPORTED",
         }, status=422)
 
-    @staticmethod
-    def _serialize_record(record, mask_for_merchant=True):
+    @classmethod
+    def _serialize_record(cls, record, mask_for_merchant=True):
         status = "under_review" if mask_for_merchant else record.status
         verdict = None if mask_for_merchant else record.verdict
         risk_verdict = None if mask_for_merchant else record.risk_verdict
+        raw_text = (((record.details or {}).get("result") or {}).get("raw_text") or "")
+        delivery_partner, courier_partner = cls._resolve_label_partners_from_text(
+            record.delivery_partner,
+            record.courier_partner,
+            raw_text,
+        )
         return {
             "id": record.id,
             "file_name": record.file_name,
@@ -319,8 +357,8 @@ class PDFValidator(APIView):
             "risk_verdict": risk_verdict,
             "score": 0 if mask_for_merchant else record.score,
             "risk_score": 0 if mask_for_merchant else record.risk_score,
-            "delivery_partner": record.delivery_partner,
-            "courier_partner": record.courier_partner,
+            "delivery_partner": delivery_partner,
+            "courier_partner": courier_partner,
             "awb": record.awb,
             "order_id": record.order_id,
             "uploaded_at": record.uploaded_at.isoformat(),
@@ -370,8 +408,11 @@ class PDFValidator(APIView):
             if not delivery_partner:
                 delivery_partner, self.from_color = self._detect_courier_from_color(temp_path)
             courier_partner, _ = self.detect_courier_partner_from_color(temp_path, parsed_result.raw_text)
-            if courier_partner == "Unknown" and delivery_partner:
-                courier_partner = delivery_partner
+            delivery_partner, courier_partner = self._resolve_label_partners_from_text(
+                delivery_partner,
+                courier_partner,
+                parsed_result.raw_text,
+            )
             if not self._is_supported_courier(delivery_partner, courier_partner, parsed_result.raw_text):
                 if temp_path and os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -460,8 +501,11 @@ class PDFValidator(APIView):
                 delivery_partner, self.from_color = self._detect_courier_from_color(temp_path)
 
             courier_partner, _ = self.detect_courier_partner_from_color(temp_path, result.raw_text)
-            if courier_partner == "Unknown" and delivery_partner:
-                courier_partner = delivery_partner
+            delivery_partner, courier_partner = self._resolve_label_partners_from_text(
+                delivery_partner,
+                courier_partner,
+                result.raw_text,
+            )
             if not self._is_supported_courier(delivery_partner, courier_partner, result.raw_text):
                 PdfValidationRecord.objects.filter(id=record_id, merchant_id=merchant_id).update(
                     status="not_approved",
@@ -523,7 +567,7 @@ class PDFValidator(APIView):
                 (("dtdc",), check_dtdc_pdf),
             ]
 
-            if "shiprocket" in courier_partner_name:
+            if "shiprocket" in courier_name or "shiprocket" in courier_partner_name:
                 forgery_result = check_shiprocket_pdf(temp_path)
             else:
                 for names, checker in courier_checks:
@@ -657,9 +701,9 @@ class PDFValidator(APIView):
     def detect_courier_partner_from_color(temp_path: str, raw_text) -> "tuple[str, bool]":
         """Fallback courier detection via dominant page colors.
 
-        Returns (delivery_partner, matched_by_color). Only recognizes
-        Delhivery today; anything below the match threshold is reported
-        as "Unknown".
+        Returns (courier_partner, matched_by_color). Recognizes wrapper
+        platforms such as Shiprocket; anything below the match threshold is
+        reported as "Unknown".
         """
         if 'powered by:' in raw_text.lower():
             return "Shiprocket", True
