@@ -37,6 +37,7 @@ def attach_shipment_label_status(rows):
             row["shipment_label_status"] = "missing"
             row["shipment_label_verdict"] = None
             row["shipment_label_file_name"] = None
+            row["shipment_label_reason"] = None
         return
 
     records = PdfValidationRecord.objects.filter(merchant_id__in=merchant_ids).filter(
@@ -62,11 +63,51 @@ def attach_shipment_label_status(rows):
             row["shipment_label_status"] = "missing"
             row["shipment_label_verdict"] = None
             row["shipment_label_file_name"] = None
+            row["shipment_label_reason"] = None
             continue
 
         row["shipment_label_status"] = record.status
         row["shipment_label_verdict"] = record.verdict
         row["shipment_label_file_name"] = record.file_name
+        row["shipment_label_reason"] = admin_visible_label_reason(record)
+
+
+def admin_visible_label_reason(record):
+    if record.status == "processing":
+        return "Checking label"
+    if record.status == "approved":
+        return "Label accepted"
+
+    details = record.details or {}
+    error = str(details.get("error") or "").strip()
+    if error:
+        return error
+
+    forgery_result = details.get("forgery_result") or {}
+    failed_checks = [
+        str(item.get("check") or "")
+        for item in (forgery_result.get("score_breakdown") or [])
+        if item.get("gate") and item.get("passed") is False
+    ]
+    courier_name = record.delivery_partner or record.courier_partner or "Courier"
+    reason_map = (
+        ("Approved branding assets", f"{courier_name} logo/design does not match verified label format"),
+        ("Barcode placement", f"Barcode placement does not match {courier_name} label format"),
+        ("Text positioning", f"Text layout does not match {courier_name} label format"),
+        ("Graphics state", f"PDF drawing format does not match {courier_name} label"),
+        ("Xobjects", f"Label design elements do not match {courier_name} format"),
+        ("Image ops", f"Label image elements do not match {courier_name} format"),
+        ("TJ and Tj value", f"Text format does not match {courier_name} label format"),
+        ("TD/Tf/Tj value", f"Text layout does not match {courier_name} label format"),
+        ("Object serialization", f"PDF structure does not match {courier_name} label format"),
+    )
+    for check in failed_checks:
+        for key, message in reason_map:
+            if key in check:
+                return message
+    if failed_checks:
+        return "Label format could not be verified"
+    return "Label could not be verified"
 
 
 def attach_verification_decisions(rows):

@@ -283,9 +283,14 @@ class PDFValidator(APIView):
 
     @classmethod
     def _configured_courier_key(cls, delivery_partner="", courier_partner=""):
-        # For marketplace labels, courier_partner is the actual last-mile
-        # carrier inside the outer label (for example Blue Dart inside
-        # Shiprocket). That is the partner the merchant must have enabled.
+        # Marketplace labels are configured by their outer platform. A
+        # Shiprocket label can mention Blue Dart/Delhivery as the last-mile
+        # carrier, but the merchant only needs Shiprocket enabled. Pure Blue
+        # Dart labels still resolve to blue_dart because delivery_partner is
+        # Blue Dart, not Shiprocket.
+        if cls._has_courier(delivery_partner, "shiprocket"):
+            return "shiprocket"
+
         for candidate in (courier_partner, delivery_partner):
             if candidate and candidate != "Unknown":
                 key = cls._courier_key(candidate)
@@ -340,7 +345,7 @@ class PDFValidator(APIView):
 
     @classmethod
     def _serialize_record(cls, record, mask_for_merchant=True):
-        status = "under_review" if mask_for_merchant else record.status
+        status = record.status
         verdict = None if mask_for_merchant else record.verdict
         risk_verdict = None if mask_for_merchant else record.risk_verdict
         raw_text = (((record.details or {}).get("result") or {}).get("raw_text") or "")
@@ -361,8 +366,50 @@ class PDFValidator(APIView):
             "courier_partner": courier_partner,
             "awb": record.awb,
             "order_id": record.order_id,
+            "reason": cls._merchant_visible_reason(record),
             "uploaded_at": record.uploaded_at.isoformat(),
         }
+
+    @staticmethod
+    def _merchant_visible_reason(record):
+        if record.status == "processing":
+            return "Checking label"
+        if record.status == "approved":
+            return "Label accepted"
+
+        details = record.details or {}
+        error = str(details.get("error") or "").strip()
+        if error:
+            if "Unsupported courier" in error:
+                return "Courier is not supported"
+            if "Unable to process" in error:
+                return "Could not read this PDF"
+            return "Label could not be verified"
+
+        forgery_result = details.get("forgery_result") or {}
+        failed_checks = [
+            str(item.get("check") or "")
+            for item in (forgery_result.get("score_breakdown") or [])
+            if item.get("gate") and item.get("passed") is False
+        ]
+        reason_map = (
+            ("Approved branding assets", "Courier branding could not be verified"),
+            ("Barcode placement", "Barcode placement does not match courier format"),
+            ("Text positioning", "Label text layout does not match courier format"),
+            ("Graphics state", "PDF format does not match courier label"),
+            ("Xobjects", "Label design elements could not be verified"),
+            ("Image ops", "Label image elements could not be verified"),
+            ("TJ and Tj value", "Label text format does not match courier format"),
+            ("TD/Tf/Tj value", "Label text layout does not match courier format"),
+            ("Object serialization", "PDF structure does not match courier format"),
+        )
+        for check in failed_checks:
+            for key, message in reason_map:
+                if key in check:
+                    return message
+        if failed_checks:
+            return "Label format could not be verified"
+        return "Label could not be verified"
 
     def get(self, request):
         auth_token = _get_auth_token_from_request(request)
@@ -370,10 +417,27 @@ class PDFValidator(APIView):
         if merchant_id is None:
             return Response({"error": "Invalid or expired merchant token"}, status=401)
 
-        records = PdfValidationRecord.objects.filter(merchant_id=merchant_id)[:50]
+        records = list(PdfValidationRecord.objects.filter(merchant_id=merchant_id)[:50])
+        for record in records:
+            if record.status == "not_approved":
+                self._unlink_rejected_record_shipment(record)
         return Response({
             "results": [self._serialize_record(record) for record in records]
         })
+
+    @staticmethod
+    def _unlink_rejected_record_shipment(record):
+        if not record.awb:
+            return
+
+        orders = OrderInfo.objects.filter(merchant_id=record.merchant_id, shipment_id__awb=record.awb)
+        if record.order_id:
+            orders = orders.filter(
+                Q(merchant_order_id__iexact=record.order_id) | Q(pa_order_id__iexact=record.order_id)
+            )
+        for order in orders:
+            order.shipment_id = None
+            order.save(update_fields=["shipment_id"])
 
     def post(self, request):
         auth_token = _get_auth_token_from_request(request)
@@ -536,25 +600,6 @@ class PDFValidator(APIView):
             )
             logger.info("Risk analysis: %s", analysis)
 
-            shipment = None
-            if result.awb:
-                try:
-                    shipment = Shipment.objects.get(awb=result.awb)
-                except Shipment.DoesNotExist:
-                    shipment = Shipment(awb=result.awb, courier=delivery_partner)
-
-                shipment.courier = delivery_partner
-                shipment.courier_partner = courier_partner
-                shipment.save()
-
-            if order_id and shipment:
-                order = OrderInfo.objects.filter(merchant_id=merchant_id).filter(
-                    Q(merchant_order_id__iexact=order_id) | Q(pa_order_id__iexact=order_id)
-                ).first()
-                if order:
-                    order.shipment_id = shipment
-                    order.save(update_fields=["shipment_id"])
-
             courier_name = (delivery_partner or "").lower()
             courier_partner_name = (courier_partner or "").lower()
             forgery_result = None
@@ -591,6 +636,23 @@ class PDFValidator(APIView):
             stored_pdf = None
             if not approved:
                 stored_pdf = self._store_suspicious_pdf(temp_path, merchant_id, record_id)
+            elif result.awb:
+                try:
+                    shipment = Shipment.objects.get(awb=result.awb)
+                except Shipment.DoesNotExist:
+                    shipment = Shipment(awb=result.awb, courier=delivery_partner)
+
+                shipment.courier = delivery_partner
+                shipment.courier_partner = courier_partner
+                shipment.save()
+
+                if order_id:
+                    order = OrderInfo.objects.filter(merchant_id=merchant_id).filter(
+                        Q(merchant_order_id__iexact=order_id) | Q(pa_order_id__iexact=order_id)
+                    ).first()
+                    if order:
+                        order.shipment_id = shipment
+                        order.save(update_fields=["shipment_id"])
 
             details = {
                 "processing": False,
