@@ -37,8 +37,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from tracking.models.trackinginfo import Shipment
 from tracking.signing import build_enquiry_link
-from tracking.api.v1.notifs import send_whatsapp_text
-from tracking.api.v1.message_templates import delivery_enquiry_message
+from tracking.api.v1.notifs import send_whatsapp_template
 from tracking.api.v1.delhivery_public_tracking import (
     refresh_delhivery_public_snapshot,
     serialize_delhivery_public_snapshot,
@@ -62,23 +61,26 @@ def _get_auth_token_from_request(request):
 
 def notify_customer_delivered(pa_order_id):
     """Send the customer a WhatsApp message with their signed order-enquiry link."""
-    order_info = OrderInfo.objects.filter(pa_order_id=pa_order_id).select_related("customer_info").first()
+    order_info = OrderInfo.objects.filter(pa_order_id=pa_order_id).select_related("customer_info", "shipment_id").first()
     if not order_info or not order_info.customer_info or not order_info.customer_info.customer_phone:
         logger.warning("Skipping delivery notification: no customer phone for order %s", pa_order_id)
         return
 
     link = build_enquiry_link(settings.FRONTEND_ENQUIRY_URL, pa_order_id)
-    message = delivery_enquiry_message(
-        order_id=pa_order_id,
-        enquiry_link=link,
-        customer_name=order_info.customer_info.customer_name,
+    courier_name = (
+        getattr(order_info.shipment_id, "courier", None)
+        or getattr(order_info.shipment_id, "courier_partner", None)
+        or "Courier"
     )
 
     try:
-        send_whatsapp_text(
+        send_whatsapp_template(
             order_info.customer_info.customer_phone,
-            message,
-            preview_url=True,
+            template_name=settings.GETGABS_DELIVERY_TEMPLATE_NAME,
+            language_code=settings.GETGABS_DELIVERY_TEMPLATE_LANGUAGE,
+            body_parameters=[courier_name, link],
+            receiver_name=order_info.customer_info.customer_name,
+            campaign_id=getattr(settings, "GETGABS_DELIVERY_CAMPAIGN_ID", ""),
             purpose="delivery_enquiry",
             order_id=pa_order_id,
         )

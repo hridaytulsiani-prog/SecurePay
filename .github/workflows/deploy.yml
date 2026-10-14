@@ -58,6 +58,15 @@ jobs:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           GETGABS_API_KEY: ${{ secrets.GETGABS_API_KEY }}
+          GETGABS_WHATSAPP_SENDER: ${{ secrets.GETGABS_WHATSAPP_SENDER }}
+          GETGABS_DELIVERY_TEMPLATE_NAME: ${{ secrets.GETGABS_DELIVERY_TEMPLATE_NAME }}
+          GETGABS_DELIVERY_TEMPLATE_LANGUAGE: ${{ secrets.GETGABS_DELIVERY_TEMPLATE_LANGUAGE }}
+          GETGABS_DELIVERY_CAMPAIGN_ID: ${{ secrets.GETGABS_DELIVERY_CAMPAIGN_ID }}
+          ZEPTOMAIL_HOST: ${{ secrets.ZEPTOMAIL_HOST }}
+          ZEPTOMAIL_AGENT_ALIAS: ${{ secrets.ZEPTOMAIL_AGENT_ALIAS }}
+          ZEPTOMAIL_API_KEY: ${{ secrets.ZEPTOMAIL_API_KEY }}
+          ZEPTOMAIL_FROM_EMAIL: ${{ secrets.ZEPTOMAIL_FROM_EMAIL }}
+          ZEPTOMAIL_FROM_NAME: ${{ secrets.ZEPTOMAIL_FROM_NAME }}
           FRONTEND_ENQUIRY_URL: ${{ secrets.FRONTEND_ENQUIRY_URL }}
         run: |
           python3 - <<'PY'
@@ -67,7 +76,19 @@ jobs:
               return "'" + value.replace("'", "'\"'\"'") + "'"
 
           with open("runtime.env", "w", encoding="utf-8") as handle:
-              for key in ("GETGABS_API_KEY", "FRONTEND_ENQUIRY_URL"):
+              for key in (
+                  "GETGABS_API_KEY",
+                  "GETGABS_WHATSAPP_SENDER",
+                  "GETGABS_DELIVERY_TEMPLATE_NAME",
+                  "GETGABS_DELIVERY_TEMPLATE_LANGUAGE",
+                  "GETGABS_DELIVERY_CAMPAIGN_ID",
+                  "ZEPTOMAIL_HOST",
+                  "ZEPTOMAIL_AGENT_ALIAS",
+                  "ZEPTOMAIL_API_KEY",
+                  "ZEPTOMAIL_FROM_EMAIL",
+                  "ZEPTOMAIL_FROM_NAME",
+                  "FRONTEND_ENQUIRY_URL",
+              ):
                   value = os.environ.get(key, "")
                   if value:
                       handle.write(f"{key}={shell_quote(value)}\n")
@@ -77,7 +98,7 @@ jobs:
           set -euo pipefail
           cd ~/SecurePay
           touch ~/.env
-          grep -v -E '^(GETGABS_API_KEY|FRONTEND_ENQUIRY_URL)=' ~/.env > ~/.env.next || true
+          grep -v -E '^(GETGABS_API_KEY|GETGABS_WHATSAPP_SENDER|GETGABS_DELIVERY_TEMPLATE_NAME|GETGABS_DELIVERY_TEMPLATE_LANGUAGE|GETGABS_DELIVERY_CAMPAIGN_ID|ZEPTOMAIL_HOST|ZEPTOMAIL_AGENT_ALIAS|ZEPTOMAIL_API_KEY|ZEPTOMAIL_FROM_EMAIL|ZEPTOMAIL_FROM_NAME|FRONTEND_ENQUIRY_URL)=' ~/.env > ~/.env.next || true
           cat ~/runtime.env >> ~/.env.next
           mv ~/.env.next ~/.env
           rm -f ~/runtime.env
@@ -91,3 +112,4 @@ jobs:
           curl -fsS -o /dev/null -H "Host: api.escrosafe.com" http://127.0.0.1:8000/openapi.json
           echo "Deploy OK"
           REMOTE
+

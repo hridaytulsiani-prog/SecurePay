@@ -10,6 +10,7 @@ across merchants.
 from django.conf import settings
 from django.db.models import Q
 from django.utils.dateparse import parse_date
+import re
 
 from rest_framework.views import Response
 from rest_framework import status
@@ -38,6 +39,7 @@ def attach_shipment_label_status(rows):
             row["shipment_label_verdict"] = None
             row["shipment_label_file_name"] = None
             row["shipment_label_reason"] = None
+            row["shipment_label_report"] = None
         return
 
     records = PdfValidationRecord.objects.filter(merchant_id__in=merchant_ids).filter(
@@ -64,19 +66,21 @@ def attach_shipment_label_status(rows):
             row["shipment_label_verdict"] = None
             row["shipment_label_file_name"] = None
             row["shipment_label_reason"] = None
+            row["shipment_label_report"] = None
             continue
 
         row["shipment_label_status"] = record.status
         row["shipment_label_verdict"] = record.verdict
         row["shipment_label_file_name"] = record.file_name
         row["shipment_label_reason"] = admin_visible_label_reason(record)
+        row["shipment_label_report"] = admin_label_report(record) if record.status == "not_approved" else None
 
 
 def admin_visible_label_reason(record):
     if record.status == "processing":
         return "Checking label"
     if record.status == "approved":
-        return "Label accepted"
+        return None
 
     details = record.details or {}
     error = str(details.get("error") or "").strip()
@@ -108,6 +112,112 @@ def admin_visible_label_reason(record):
     if failed_checks:
         return "Label format could not be verified"
     return "Label could not be verified"
+
+
+CHECK_EXPLANATIONS = {
+    "Header": "Checks that the PDF starts like a genuine courier-generated file. A different header or offset can indicate the file was recreated or edited by another tool.",
+    "EOF": "Checks the end-of-file structure. Real courier labels usually have a consistent EOF pattern; extra or missing markers can show manual editing.",
+    "XObjects": "Checks reusable PDF design objects such as logo/image blocks. Genuine labels normally reuse these objects in a predictable way.",
+    "Image Ops": "Checks image drawing operations used for logos, barcodes, and label artwork. Missing or extra image operations can reveal a fake layout.",
+    "Object serialization": "Checks how PDF objects are written internally. Different serialization often means the PDF was produced by a non-courier generator.",
+    "Page compression": "Checks the compression profile of page streams. Courier systems tend to emit a stable compression style.",
+    "f*/b*": "Checks courier-specific drawing commands. These commands are part of the label's internal drawing fingerprint.",
+    "/Trans entry in page directory": "Checks courier-specific page dictionary metadata used in genuine label output.",
+    "/Rotate entry": "Checks page rotation metadata. Unexpected rotation entries can indicate regenerated PDF structure.",
+    "Font redundant /Name entry": "Checks font dictionary structure. Genuine labels often keep consistent font metadata.",
+    "Barcode text matches": "Checks whether decoded barcode values also appear in the visible/extracted label text.",
+    "Barcode values": "Checks barcode count and barcode formats against genuine label samples.",
+    "Barcode contributions": "Combines barcode-related mismatch signals into the fraud score.",
+    "Approved branding assets": "Checks that courier logos and brand assets match the verified courier label format.",
+    "Barcode placement": "Checks that barcode placement matches the expected courier label template.",
+    "Text positioning": "Checks whether important text appears in expected label positions.",
+    "Graphics state": "Checks low-level PDF drawing state that genuine labels usually keep consistent.",
+    "TJ and Tj value": "Checks text rendering commands used by the PDF.",
+    "TD/Tf/Tj value": "Checks text placement and font commands used by the PDF.",
+}
+
+
+def _split_expected_actual(detail):
+    text = str(detail or "")
+    patterns = (
+        r"got (?P<actual>.*?), real (?P<expected>.*?)(?:\.|$)",
+        r"got (?P<actual>.*?); real (?P<expected>.*?)(?:\.|$)",
+        r"got (?P<actual>.*?), expected (?P<expected>.*?)(?:\.|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group("expected").strip(), match.group("actual").strip()
+    if "matches real sample" in text:
+        return "Matches real courier sample", "Matches uploaded PDF"
+    return "Real courier baseline", text or "-"
+
+
+def _admin_report_rows_from_breakdown(forgery_result):
+    rows = []
+    for item in (forgery_result or {}).get("score_breakdown") or []:
+        check = str(item.get("check") or "Label property")
+        detail = str(item.get("detail") or "")
+        expected, actual = _split_expected_actual(detail)
+        rows.append(
+            {
+                "property": check,
+                "why": CHECK_EXPLANATIONS.get(check, "Compares the uploaded PDF against the courier's real label structure."),
+                "expected": expected,
+                "actual": actual,
+                "result": "Passed" if item.get("passed") else "Failed",
+                "is_gate": bool(item.get("gate")),
+                "detail": detail,
+            }
+        )
+    return rows
+
+
+def _admin_report_rows_from_checks(result):
+    rows = []
+    for check in (result or {}).get("checks") or []:
+        findings = check.get("findings") or []
+        evidence = "; ".join(str(finding.get("evidence") or finding.get("message") or "") for finding in findings).strip("; ")
+        rows.append(
+            {
+                "property": check.get("title") or check.get("key") or "Label check",
+                "why": check.get("summary") or "Checks one fraud signal from the uploaded courier label.",
+                "expected": "Check should pass against a genuine label",
+                "actual": evidence or check.get("status") or "-",
+                "result": "Passed" if check.get("status") == "PASS" else "Failed" if check.get("status") == "FAIL" else "Not checked",
+                "is_gate": bool(any(finding.get("critical") for finding in findings)),
+                "detail": evidence or check.get("summary") or "",
+            }
+        )
+    return rows
+
+
+def admin_label_report(record):
+    details = record.details or {}
+    result = details.get("result") or {}
+    forgery_result = details.get("forgery_result") or {}
+    risk_analysis = details.get("risk_analysis") or {}
+    rows = _admin_report_rows_from_breakdown(forgery_result)
+    if not rows:
+        rows = _admin_report_rows_from_checks(result)
+
+    failed_rows = [row for row in rows if row.get("result") == "Failed"]
+    decisive_rows = [row for row in failed_rows if row.get("is_gate")]
+    return {
+        "record_id": record.id,
+        "file_name": record.file_name,
+        "courier": record.delivery_partner or record.courier_partner or "",
+        "awb": record.awb,
+        "order_id": record.order_id,
+        "verdict": record.verdict,
+        "risk_verdict": record.risk_verdict,
+        "score": record.score,
+        "risk_score": record.risk_score,
+        "failure_summary": decisive_rows[0]["detail"] if decisive_rows else failed_rows[0]["detail"] if failed_rows else admin_visible_label_reason(record),
+        "rows": rows,
+        "risk_reasons": risk_analysis.get("reasons") or [],
+        "barcodes": result.get("barcodes") or [],
+    }
 
 
 def attach_verification_decisions(rows):
@@ -151,10 +261,12 @@ class AdminOrderListView(AdminAPIView):
         courier_filter = (request.GET.get("courier") or "").strip()
         delivery_status_filter = (request.GET.get("delivery_status") or "").strip()
         shipment_label_status = (request.GET.get("shipment_label_status") or "").strip().lower()
+        sort_order = (request.GET.get("sort") or "newest").strip().lower()
+        order_by = "order_date" if sort_order == "oldest" else "-order_date"
 
         qs = OrderInfo.objects.select_related(
             "merchant", "customer_info", "shipment_id", "enquiry"
-        ).order_by("-order_date")
+        ).order_by(order_by)
 
         if merchant_id:
             qs = qs.filter(merchant_id=merchant_id)

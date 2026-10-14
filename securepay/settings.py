@@ -222,9 +222,20 @@ DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'SecurePay <no-reply@secure
 REGISTER_OTP_EMAIL_ASYNC = os.getenv('REGISTER_OTP_EMAIL_ASYNC', 'true').lower() == 'true'
 # TEMPORARY test bypass: when set (e.g. 123456), that code verifies any registration. Leave empty in production.
 REGISTER_OTP_BYPASS_CODE = os.getenv('REGISTER_OTP_BYPASS_CODE', '')
+ZEPTOMAIL_HOST = os.getenv('ZEPTOMAIL_HOST', 'https://cpaas.zoho.com').rstrip('/')
+ZEPTOMAIL_API_URL = os.getenv('ZEPTOMAIL_API_URL', '')
+ZEPTOMAIL_AGENT_ALIAS = os.getenv('ZEPTOMAIL_AGENT_ALIAS', '')
+ZEPTOMAIL_API_KEY = os.getenv('ZEPTOMAIL_API_KEY', '')
+ZEPTOMAIL_FROM_EMAIL = os.getenv('ZEPTOMAIL_FROM_EMAIL', 'no-reply@escrosafe.com')
+ZEPTOMAIL_FROM_NAME = os.getenv('ZEPTOMAIL_FROM_NAME', 'EscroSafe')
+ZEPTOMAIL_TIMEOUT = int(os.getenv('ZEPTOMAIL_TIMEOUT', '8'))
 
 ADMIN_ACCOUNT_SETUP_KEY = os.getenv('ADMIN_ACCOUNT_SETUP_KEY', 'securepay-admin-setup')
 GETGABS_API_KEY = os.getenv('GETGABS_API_KEY', '')
+GETGABS_WHATSAPP_SENDER = os.getenv('GETGABS_WHATSAPP_SENDER', '')
+GETGABS_DELIVERY_TEMPLATE_NAME = os.getenv('GETGABS_DELIVERY_TEMPLATE_NAME', 'order_delivered_enquiry')
+GETGABS_DELIVERY_TEMPLATE_LANGUAGE = os.getenv('GETGABS_DELIVERY_TEMPLATE_LANGUAGE', 'en_US')
+GETGABS_DELIVERY_CAMPAIGN_ID = os.getenv('GETGABS_DELIVERY_CAMPAIGN_ID', '')
 FRONTEND_ENQUIRY_URL = os.getenv('FRONTEND_ENQUIRY_URL', 'https://merchant.escrosafe.com/enquiry')
 
 SHIPMENT_LABEL_REMINDER_TIMEZONE = 'Asia/Kolkata'

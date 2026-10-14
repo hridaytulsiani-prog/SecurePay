@@ -40,6 +40,13 @@ from tracking.models.whatsapp_log import WhatsAppMessageLog
 logger = logging.getLogger(__name__)
 
 
+def _normalize_whatsapp_number(to_number: str) -> str:
+    digits = "".join(ch for ch in str(to_number) if ch.isdigit())
+    if len(digits) == 10:
+        return f"91{digits}"
+    return digits or str(to_number)
+
+
 def send_whatsapp_text(to_number: str, message: str, preview_url: bool = False, *, purpose: str = "", order_id: str = ""):
     """
     Send one WhatsApp text message to one recipient via the GetGabs API, and
@@ -107,8 +114,9 @@ def send_whatsapp_text(to_number: str, message: str, preview_url: bool = False, 
     """
     # Log the attempt before doing anything over the network — see point 1
     # in the docstring above for why this matters.
+    recipient = _normalize_whatsapp_number(to_number)
     log = WhatsAppMessageLog.objects.create(
-        to_number=str(to_number),
+        to_number=recipient,
         message_body=message,
         purpose=purpose,
         order_id=order_id,
@@ -122,7 +130,7 @@ def send_whatsapp_text(to_number: str, message: str, preview_url: bool = False, 
     # or restructure these keys; GetGabs will reject anything that doesn't
     # match this shape exactly.
     payload = {
-        "to": str(to_number),
+        "to": recipient,
         "text": {
             "body": message,
             "preview_url": preview_url
@@ -169,4 +177,78 @@ def send_whatsapp_text(to_number: str, message: str, preview_url: bool = False, 
     log.raw_response = data  # full response kept in case anything else in it is needed later
     log.save(update_fields=["status", "wa_id", "wa_message_id", "raw_response", "updated_at"])
 
+    return data
+
+
+def send_whatsapp_template(
+    to_number: str,
+    *,
+    template_name: str,
+    language_code: str,
+    body_parameters: list[str],
+    receiver_name: str = "",
+    purpose: str = "",
+    order_id: str = "",
+    campaign_id: str = "",
+):
+    """Send an approved WhatsApp template with BODY variables through GetGabs."""
+    message_body = f"template:{template_name} body={body_parameters}"
+    recipient = _normalize_whatsapp_number(to_number)
+    log = WhatsAppMessageLog.objects.create(
+        to_number=recipient,
+        message_body=message_body,
+        purpose=purpose,
+        order_id=order_id,
+        status="pending",
+    )
+
+    url = "https://app.getgabs.com/whatsappbusiness/send-templated-message"
+    payload = {
+        "api_key": settings.GETGABS_API_KEY,
+        "sender": _normalize_whatsapp_number(getattr(settings, "GETGABS_WHATSAPP_SENDER", "")),
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "receiver_name": receiver_name or recipient,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language_code},
+            "components": [
+                {
+                    "type": "BODY",
+                    "parameters": [
+                        {"type": "text", "text": str(value)}
+                        for value in body_parameters
+                    ],
+                }
+            ],
+        },
+    }
+    if campaign_id:
+        payload["campaign_id"] = campaign_id
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        log.status = "failed"
+        response_text = ""
+        response = getattr(exc, "response", None)
+        if response is not None:
+            response_text = getattr(response, "text", "") or ""
+        log.error = f"{exc} {response_text}".strip()
+        log.save(update_fields=["status", "error", "updated_at"])
+        raise
+
+    logger.info("WhatsApp template message sent: %s", data)
+    contact = (data.get("contacts") or [{}])[0]
+    sent_message = (data.get("messages") or [{}])[0]
+    log.status = "sent"
+    log.wa_id = contact.get("wa_id", "") or ""
+    log.wa_message_id = sent_message.get("id", "") or ""
+    log.raw_response = data
+    log.save(update_fields=["status", "wa_id", "wa_message_id", "raw_response", "updated_at"])
     return data

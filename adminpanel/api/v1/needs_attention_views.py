@@ -26,6 +26,7 @@ class AdminNeedsAttentionView(AdminAPIView):
 
     def get(self, request):
         q = (request.GET.get("q") or "").strip().lower()
+        sort_order = (request.GET.get("sort") or "newest").strip().lower()
         if request.GET.get("sync") == "1":
             sync_recent_orders_to_pa(limit=50)
         items = []
@@ -42,7 +43,7 @@ class AdminNeedsAttentionView(AdminAPIView):
                     "type": "missing_label",
                     "severity": "warning",
                     "title": "Shipment label missing",
-                    "message": f"Merchant has not uploaded a shipment label for {_order_label(order)}.",
+                    "message": "Merchant has not uploaded a shipment label",
                     "merchant_name": order.merchant.merchant_name if order.merchant else "",
                     "merchant_email": order.merchant.merchant_email if order.merchant else "",
                     "order_id": order.merchant_order_id,
@@ -55,7 +56,7 @@ class AdminNeedsAttentionView(AdminAPIView):
                         or order.shipment_label_reminder_started_at
                         or order.order_date
                     ).isoformat(),
-                    "action_status": "Waiting for merchant upload",
+                    "action_status": "Waiting for upload",
                     "can_decide": False,
                 }
             )
@@ -124,7 +125,7 @@ class AdminNeedsAttentionView(AdminAPIView):
                 }
             )
 
-        items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        items.sort(key=lambda item: item.get("created_at") or "", reverse=sort_order != "oldest")
         if q:
             items = [
                 item

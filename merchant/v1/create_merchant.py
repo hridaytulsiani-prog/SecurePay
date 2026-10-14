@@ -23,11 +23,12 @@ import secrets
 import re
 import logging
 import threading
+import json
 from hashlib import sha512
+import requests
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.core.cache import cache
-from django.core.mail import send_mail
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -139,19 +140,66 @@ def _create_verified_merchant(payload):
 
 
 def _send_registration_otp_email(email, otp):
+    api_key = str(getattr(settings, "ZEPTOMAIL_API_KEY", "") or "").strip()
+    if api_key.lower().startswith("zoho-enczapikey "):
+        api_key = api_key.split(None, 1)[1].strip()
+    if not api_key:
+        logger.error("ZEPTOMAIL_API_KEY is not configured; merchant registration OTP was not sent to %s", email)
+        return
+
+    api_url = str(getattr(settings, "ZEPTOMAIL_API_URL", "") or "").strip()
+    if not api_url:
+        host = str(getattr(settings, "ZEPTOMAIL_HOST", "https://cpaas.zoho.com")).strip().rstrip("/")
+        if host and not host.startswith(("http://", "https://")):
+            host = f"https://{host}"
+        api_url = f"{host}/v1.1/email"
+
+    from_email = str(getattr(settings, "ZEPTOMAIL_FROM_EMAIL", "") or "").strip()
+    from_name = str(getattr(settings, "ZEPTOMAIL_FROM_NAME", "") or "").strip() or "EscroSafe"
+    timeout = int(getattr(settings, "ZEPTOMAIL_TIMEOUT", 8) or 8)
+    subject = "Verify your EscroSafe merchant account"
+    text_body = (
+        f"Your EscroSafe verification code is {otp}.\n\n"
+        "This code expires in 10 minutes. If you did not request this account, you can ignore this email."
+    )
+    html_body = (
+        "<div style=\"font-family:Arial,sans-serif;color:#173d38;line-height:1.5\">"
+        "<h2 style=\"margin:0 0 12px\">Verify your EscroSafe merchant account</h2>"
+        "<p>Your verification code is:</p>"
+        f"<p style=\"font-size:28px;font-weight:700;letter-spacing:4px;margin:12px 0\">{otp}</p>"
+        "<p>This code expires in 10 minutes. If you did not request this account, you can ignore this email.</p>"
+        "</div>"
+    )
+
+    payload = {
+        "from": {"address": from_email, "name": from_name},
+        "to": [{"email_address": {"address": email}}],
+        "subject": subject,
+        "textbody": text_body,
+        "htmlbody": html_body,
+    }
+
     try:
-        send_mail(
-            subject="Verify your SecurePay merchant account",
-            message=(
-                f"Your SecurePay verification code is {otp}.\n\n"
-                "This code expires in 10 minutes. If you did not request this account, you can ignore this email."
-            ),
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-            recipient_list=[email],
-            fail_silently=False,
+        response = requests.post(
+            api_url,
+            data=json.dumps(payload),
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Zoho-enczapikey {api_key}",
+                "content-type": "application/json",
+            },
+            timeout=timeout,
         )
+        if response.status_code >= 400:
+            logger.error(
+                "Zoho CPaaS rejected merchant registration OTP email to %s: status=%s body=%s",
+                email,
+                response.status_code,
+                response.text,
+            )
+            response.raise_for_status()
     except Exception:
-        logger.exception("Unable to send merchant registration OTP to %s", email)
+        logger.exception("Unable to send merchant registration OTP to %s through Zoho CPaaS", email)
 
 
 def _send_registration_otp_email_soon(email, otp):
