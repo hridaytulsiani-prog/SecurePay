@@ -633,10 +633,10 @@ class PDFValidator(APIView):
                 risk_score = analysis.get("score") or 0
                 risk_verdict = analysis.get("verdict")
 
-            stored_pdf = None
-            if not approved:
-                stored_pdf = self._store_suspicious_pdf(temp_path, merchant_id, record_id)
-            elif result.awb:
+            # Keep the original upload for both approved and rejected labels so
+            # admins can preview the exact PDF that was validated later.
+            stored_pdf = self._store_uploaded_pdf(temp_path, merchant_id, record_id)
+            if approved and result.awb:
                 try:
                     shipment = Shipment.objects.get(awb=result.awb)
                 except Shipment.DoesNotExist:
@@ -677,7 +677,7 @@ class PDFValidator(APIView):
             )
         except Exception as exc:
             logger.exception("PDF validation failed for record %s: %s", record_id, exc)
-            stored_pdf = self._store_suspicious_pdf(temp_path, merchant_id, record_id)
+            stored_pdf = self._store_uploaded_pdf(temp_path, merchant_id, record_id)
             details = {"processing": False, "error": "Unable to process this file."}
             if stored_pdf:
                 details["stored_pdf"] = stored_pdf
@@ -691,14 +691,14 @@ class PDFValidator(APIView):
                 os.remove(temp_path)
 
     @staticmethod
-    def _store_suspicious_pdf(temp_path: str, merchant_id: int, record_id: int) -> Optional[str]:
+    def _store_uploaded_pdf(temp_path: str, merchant_id: int, record_id: int) -> Optional[str]:
         if not temp_path or not os.path.exists(temp_path):
             return None
 
         record = PdfValidationRecord.objects.filter(id=record_id, merchant_id=merchant_id).first()
         original_name = record.file_name if record else f"record_{record_id}.pdf"
         safe_name = get_valid_filename(original_name) or f"record_{record_id}.pdf"
-        relative_dir = os.path.join("suspicious_pdfs", f"merchant_{merchant_id}")
+        relative_dir = os.path.join("shipment_labels", f"merchant_{merchant_id}")
         absolute_dir = os.path.join(settings.MEDIA_ROOT, relative_dir)
         os.makedirs(absolute_dir, exist_ok=True)
 

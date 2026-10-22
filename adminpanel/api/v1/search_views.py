@@ -158,6 +158,7 @@ def _order_detail(order, summary):
 def _issue_summary(issue):
     return {
         "id": issue.id,
+        "merchant_id": issue.merchant_id,
         "reference": issue.reference,
         "merchant_name": issue.merchant_name,
         "issue_type_label": issue.get_issue_type_display(),

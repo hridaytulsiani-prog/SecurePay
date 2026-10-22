@@ -32,6 +32,7 @@ from adminpanel.api.v1.customer_issue_views import (
 from adminpanel.api.v1.merchant_issue_report import AdminMerchantIssueOrderReportView
 from adminpanel.api.v1.order_check_views import AdminOrderCheckView
 from adminpanel.api.v1.search_views import AdminSearchView
+from adminpanel.api.v1.merchant_history_views import AdminMerchantHistoryView
 from adminpanel.api.v1.merchant_issue_views import (
     AdminMerchantIssueDetailView,
     AdminMerchantIssueListView,
@@ -87,6 +88,7 @@ urlpatterns = [
     path("accounts/<int:user_id>/", AdminAccountDetailView.as_view(), name="admin-account-detail"),
     # Read-only, cross-merchant listings
     path("merchants/", AdminMerchantListView.as_view(), name="admin-merchants"),
+    path("merchants/<int:merchant_id>/history/", AdminMerchantHistoryView.as_view(), name="admin-merchant-history"),
     path("merchants/<int:merchant_id>/", AdminMerchantDetailView.as_view(), name="admin-merchant-detail"),
     path("orders/", AdminOrderListView.as_view(), name="admin-orders"),
     path("enquiries/", AdminEnquiryListView.as_view(), name="admin-enquiries"),

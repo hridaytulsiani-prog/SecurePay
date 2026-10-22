@@ -22,6 +22,7 @@ from rest_framework.views import APIView, Response
 
 from adminpanel.models import CustomerIssue, CustomerIssueAttachment, CustomerIssueMessage, CustomerIssueNote
 from adminpanel.permissions import AdminAPIView
+from adminpanel.api.v1.payment_ids import payment_id_for_order
 from payments.models.orderinfo import OrderInfo
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,10 @@ def _check_photos(issue_type, files):
 def _serialize(issue):
     messages = list(issue.messages.all())
     last = messages[-1] if messages else None
+    order_summary = dict(issue.order or {})
+    current_order = _find_order(issue.order_ref)
+    if current_order:
+        order_summary.update(current_order)
     return {
         "id": issue.id,
         "reference": issue.reference,
@@ -120,7 +125,7 @@ def _serialize(issue):
         "customer_phone": issue.customer_phone,
         "customer_email": issue.customer_email,
         "order_ref": issue.order_ref,
-        "order": issue.order,
+        "order": order_summary,
         "issue_type": issue.issue_type,
         "issue_type_label": issue.get_issue_type_display(),
         "description": issue.description,
@@ -182,6 +187,8 @@ def _lookup_order(ref):
     shipment = order.shipment_id
     return {
         "merchant_order_id": order.merchant_order_id,
+        "merchant_id": order.merchant_id,
+        "payment_id": payment_id_for_order(order),
         "awb": getattr(shipment, "awb", "") or "",
         "courier": getattr(shipment, "courier", "") or "",
         "merchant_name": order.merchant.merchant_name if order.merchant_id else "",
@@ -206,8 +213,19 @@ class AdminCustomerIssueListView(AdminAPIView):
         status_filter = (request.GET.get("status") or "").strip()
         type_filter = (request.GET.get("type") or "").strip()
         q = (request.GET.get("q") or "").strip()
+        merchant_id = (request.GET.get("merchant_id") or "").strip()
 
         qs = _queryset()
+        if merchant_id.isdigit():
+            order_refs = {
+                reference
+                for row in OrderInfo.objects.filter(merchant_id=int(merchant_id)).values_list(
+                    "merchant_order_id", "pa_order_id", "shipment_id__awb"
+                )
+                for reference in row
+                if reference
+            }
+            qs = qs.filter(order_ref__in=order_refs) if order_refs else qs.none()
         if status_filter in VALID_STATUSES:
             qs = qs.filter(status=status_filter)
         if type_filter in VALID_TYPES:
@@ -405,7 +423,7 @@ def customer_issues_for_order(order):
     refs = [value for value in (order.merchant_order_id, order.pa_order_id, getattr(order.shipment_id, "awb", "")) if value]
     rows = (
         CustomerIssue.objects.filter(order_ref__in=refs)
-        .prefetch_related("notes__admin_user", "attachments")
+        .prefetch_related("messages__admin_user", "notes__admin_user", "attachments")
         .order_by("-created_at")[:10]
     )
     return [
@@ -419,6 +437,15 @@ def customer_issues_for_order(order):
             "status_label": row.get_status_display(),
             "created_at": row.created_at.isoformat(),
             "photo_count": len(row.attachments.all()),
+            "messages": [
+                {
+                    "sender": message.sender,
+                    "body": message.body,
+                    "by": message.admin_user.username if message.admin_user else "",
+                    "created_at": message.created_at.isoformat(),
+                }
+                for message in row.messages.all()
+            ],
             "notes": [
                 {"note": n.note, "by": n.admin_user.username if n.admin_user else "", "created_at": n.created_at.isoformat()}
                 for n in row.notes.all()

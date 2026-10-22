@@ -3,6 +3,7 @@ from rest_framework import status
 from rest_framework.views import APIView, Response
 
 from adminpanel.permissions import AdminAPIView
+from adminpanel.api.v1.payment_ids import payment_id_for_protected_order
 from payments.models import MerchantInfo, PAFinancialCommand, PAProviderCapability, PAProtectedOrder
 from payments.services.pa_control import (
     apply_provider_command_result,
@@ -19,6 +20,12 @@ from payments.services.pa_control import (
     sync_recent_orders_to_pa,
     update_delivery_state,
 )
+
+
+def _serialize_admin_order(protected_order):
+    row = serialize_order(protected_order)
+    row["display_payment_id"] = payment_id_for_protected_order(protected_order)
+    return row
 
 
 class PACapabilityListView(AdminAPIView):
@@ -59,7 +66,7 @@ class PAProtectedOrderListCreateView(AdminAPIView):
             ):
                 send_aggregator_request(item, item.decision_state, actor=getattr(request, "admin_user", None))
                 item.refresh_from_db()
-        return Response({"results": [serialize_order(item) for item in rows]})
+        return Response({"results": [_serialize_admin_order(item) for item in rows]})
 
     def post(self, request):
         ensure_default_capabilities()
@@ -73,7 +80,7 @@ class PAProtectedOrderListCreateView(AdminAPIView):
             protected_order = register_protected_order(payload)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=400)
-        return Response({"order": serialize_order(protected_order)}, status=status.HTTP_201_CREATED)
+        return Response({"order": _serialize_admin_order(protected_order)}, status=status.HTTP_201_CREATED)
 
 
 class PAProtectedOrderActionView(AdminAPIView):
@@ -116,10 +123,10 @@ class PAProtectedOrderActionView(AdminAPIView):
             else:
                 return Response({"error": "unknown PA action"}, status=400)
         except ValueError as exc:
-            return Response({"error": str(exc), "order": serialize_order(protected_order)}, status=400)
+            return Response({"error": str(exc), "order": _serialize_admin_order(protected_order)}, status=400)
 
         protected_order.refresh_from_db()
-        return Response({"order": serialize_order(protected_order)})
+        return Response({"order": _serialize_admin_order(protected_order)})
 
 
 class PAEvidenceReportView(APIView):

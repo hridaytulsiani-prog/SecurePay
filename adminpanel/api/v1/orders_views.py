@@ -16,14 +16,25 @@ from rest_framework.views import Response
 from rest_framework import status
 
 from adminpanel.permissions import AdminAPIView
+from adminpanel.models import CustomerIssue, MerchantIssue
 from payments.models.merchantinfo import MerchantInfo
 from payments.models.orderinfo import OrderInfo
 from payments.models.enquirydata import EnquiryData, EnquiryNote
 from tracking.models.pdf_validation import PdfValidationRecord
 from tracking.models.delhivery_verification_decision import DelhiveryVerificationDecision
+from adminpanel.api.v1.payment_ids import numeric_payment_id
 
 
-def attach_shipment_label_status(rows):
+def attach_shipment_label_status(rows, request=None):
+    def attach_without_pdf_record(row):
+        has_linked_shipment = bool(row.get("shipment_id__awb"))
+        row["shipment_label_status"] = "shipment_linked" if has_linked_shipment else "missing"
+        row["shipment_label_verdict"] = None
+        row["shipment_label_file_name"] = None
+        row["shipment_label_pdf_url"] = None
+        row["shipment_label_reason"] = None
+        row["shipment_label_report"] = None
+
     merchant_ids = {row.get("merchant_id") for row in rows if row.get("merchant_id")}
     order_ids = {
         value
@@ -35,11 +46,7 @@ def attach_shipment_label_status(rows):
 
     if not merchant_ids or (not order_ids and not awbs):
         for row in rows:
-            row["shipment_label_status"] = "missing"
-            row["shipment_label_verdict"] = None
-            row["shipment_label_file_name"] = None
-            row["shipment_label_reason"] = None
-            row["shipment_label_report"] = None
+            attach_without_pdf_record(row)
         return
 
     records = PdfValidationRecord.objects.filter(merchant_id__in=merchant_ids).filter(
@@ -62,16 +69,18 @@ def attach_shipment_label_status(rows):
             or by_awb_key.get((merchant_id, row.get("shipment_id__awb")))
         )
         if not record:
-            row["shipment_label_status"] = "missing"
-            row["shipment_label_verdict"] = None
-            row["shipment_label_file_name"] = None
-            row["shipment_label_reason"] = None
-            row["shipment_label_report"] = None
+            attach_without_pdf_record(row)
             continue
 
         row["shipment_label_status"] = record.status
         row["shipment_label_verdict"] = record.verdict
         row["shipment_label_file_name"] = record.file_name
+        stored_pdf = (record.details or {}).get("stored_pdf")
+        row["shipment_label_pdf_url"] = (
+            request.build_absolute_uri(f"{settings.MEDIA_URL}{stored_pdf}")
+            if request and stored_pdf
+            else None
+        )
         row["shipment_label_reason"] = admin_visible_label_reason(record)
         row["shipment_label_report"] = admin_label_report(record) if record.status == "not_approved" else None
 
@@ -238,6 +247,85 @@ def attach_verification_decisions(rows):
         row["verification_decided_at"] = decision.decided_at.isoformat() if decision else None
 
 
+def attach_issue_status(rows):
+    """Attach whether each order has open issues or only resolved issues."""
+    merchant_ids = {row.get("merchant_id") for row in rows if row.get("merchant_id")}
+    row_keys = {
+        str(value).strip().lower()
+        for row in rows
+        for value in (row.get("merchant_order_id"), row.get("pa_order_id"), row.get("shipment_id__awb"))
+        if value
+    }
+    merchant_issues = {}
+    for issue in MerchantIssue.objects.filter(merchant_id__in=merchant_ids).values("id", "merchant_id", "orders", "status"):
+        issue_info = {
+            "id": issue["id"],
+            "reference": f"ISS-{issue['id']:05d}",
+            "status": issue["status"],
+        }
+        for linked_order in issue.get("orders") or []:
+            for value in (
+                linked_order.get("merchant_order_id"),
+                linked_order.get("order_id"),
+                linked_order.get("pa_order_id"),
+                linked_order.get("awb"),
+            ):
+                if value:
+                    key = (issue["merchant_id"], str(value).strip().lower())
+                    merchant_issues.setdefault(key, []).append(issue_info)
+
+    customer_issues = {}
+    for issue in CustomerIssue.objects.all().values("id", "order_ref", "order", "status"):
+        issue_info = {
+            "id": issue["id"],
+            "reference": f"CIS-{issue['id']:05d}",
+            "status": issue["status"],
+        }
+        issue_keys = {str(issue.get("order_ref") or "").strip().lower()}
+        linked_order = issue.get("order") or {}
+        issue_keys.update(
+            str(value).strip().lower()
+            for value in (
+                linked_order.get("merchant_order_id"),
+                linked_order.get("order_id"),
+                linked_order.get("pa_order_id"),
+                linked_order.get("awb"),
+            )
+            if value
+        )
+        for key in issue_keys & row_keys:
+            customer_issues.setdefault(key, []).append(issue_info)
+
+    for row in rows:
+        keys = {
+            str(value).strip().lower()
+            for value in (row.get("merchant_order_id"), row.get("pa_order_id"), row.get("shipment_id__awb"))
+            if value
+        }
+        linked_merchant_issues = [
+            issue
+            for key in keys
+            for issue in merchant_issues.get((row.get("merchant_id"), key), [])
+        ]
+        linked_customer_issues = [
+            issue
+            for key in keys
+            for issue in customer_issues.get(key, [])
+        ]
+        linked_merchant_issues = list({issue["id"]: issue for issue in linked_merchant_issues}.values())
+        linked_customer_issues = list({issue["id"]: issue for issue in linked_customer_issues}.values())
+        preferred = lambda issues: next((issue for issue in issues if issue["status"] != "resolved"), issues[0] if issues else None)
+        row["merchant_issue"] = preferred(linked_merchant_issues)
+        row["customer_issue"] = preferred(linked_customer_issues)
+        statuses = [issue["status"] for issue in linked_merchant_issues + linked_customer_issues]
+        row["issue_status"] = (
+            "open" if any(status == "new" for status in statuses)
+            else "in_progress" if any(status == "in_progress" for status in statuses)
+            else "resolved" if statuses
+            else None
+        )
+
+
 class AdminOrderListView(AdminAPIView):
     """Paginated, searchable list of every order across all merchants."""
     required_permission = "orders.view"
@@ -283,14 +371,16 @@ class AdminOrderListView(AdminAPIView):
 
         # .values(...) flattens related fields (merchant__merchant_name, etc.)
         # straight into dicts the frontend can render without extra joins.
-        rows = qs.values(
+        rows = list(qs.values(
             "id",
             "merchant_order_id",
             "pa_order_id",
             "pa_payment_id",
+            "phonepe_payment_id",
             "order_amount",
             "order_currency",
             "order_status",
+            "payment_state",
             "order_date",
             "payment_provider",
             "merchant_id",
@@ -306,7 +396,12 @@ class AdminOrderListView(AdminAPIView):
             "enquiry_id",
             "enquiry__enquiry_id",
             "enquiry__status",
-        )
+        ))
+
+        for row in rows:
+            row["display_payment_id"] = numeric_payment_id(
+                f"order:{row.get('merchant_order_id')}:{row.get('id')}"
+            )
 
         # Free-text search is done in Python rather than the DB because it
         # spans multiple unrelated columns (order id, customer, merchant) —
@@ -320,6 +415,7 @@ class AdminOrderListView(AdminAPIView):
                     str(v) for v in [
                         r.get("merchant_order_id"),
                         r.get("pa_order_id"),
+                        r.get("display_payment_id"),
                         r.get("shipment_id__awb"),
                         r.get("customer_info__customer_name"),
                         r.get("customer_info__customer_email"),
@@ -328,11 +424,9 @@ class AdminOrderListView(AdminAPIView):
                     ] if v
                 ).lower()
             ]
-        else:
-            rows = list(rows)
-
-        attach_shipment_label_status(rows)
+        attach_shipment_label_status(rows, request=request)
         attach_verification_decisions(rows)
+        attach_issue_status(rows)
         if shipment_label_status:
             rows = [
                 row
@@ -472,6 +566,7 @@ class AdminEnquiryListView(AdminAPIView):
                 "order_amount",
                 "order_currency",
                 "order_status",
+                "merchant_id",
                 "merchant__merchant_name",
                 "merchant__merchant_email",
                 "customer_info__customer_name",
@@ -522,6 +617,7 @@ class AdminEnquiryListView(AdminAPIView):
             e["order_amount"] = order.get("order_amount") if order else None
             e["order_currency"] = order.get("order_currency") if order else None
             e["order_status"] = order.get("order_status") if order else None
+            e["merchant_id"] = order.get("merchant_id") if order else None
             e["merchant_name"] = order.get("merchant__merchant_name") if order else None
             e["merchant_email"] = order.get("merchant__merchant_email") if order else None
             e["customer_name"] = order.get("customer_info__customer_name") if order else None

@@ -12,6 +12,7 @@ from rest_framework import status
 from rest_framework.views import Response
 
 from adminpanel.api.v1.customer_issue_views import customer_issues_for_order
+from adminpanel.api.v1.payment_ids import payment_id_for_order
 from adminpanel.models import ContactMessage, MerchantIssue
 from adminpanel.order_check import build_order_check
 from adminpanel.permissions import AdminAPIView
@@ -86,6 +87,7 @@ class AdminOrderCheckView(AdminAPIView):
             for m in ContactMessage.objects.filter(order_id__in=contact_ids).order_by("-created_at")[:10]
         ]
         payload = build_order_check(order, issues)
+        payload["order"]["payment_id"] = payment_id_for_order(order)
         payload["contact_messages"] = contact_messages
         payload["customer_issues"] = customer_issues_for_order(order)
         return Response(payload)

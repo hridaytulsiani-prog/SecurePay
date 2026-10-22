@@ -12,6 +12,8 @@ from rest_framework.views import Response
 
 from adminpanel.models import MerchantIssue, MerchantIssueMessage, MerchantIssueNote
 from adminpanel.permissions import AdminAPIView
+from adminpanel.api.v1.payment_ids import numeric_payment_id, payment_id_for_order
+from payments.models.orderinfo import OrderInfo
 
 MAX_NOTE_LENGTH = 2000
 MAX_MESSAGE_LENGTH = 2000
@@ -29,6 +31,33 @@ def _serialize_message(message):
     }
 
 
+def _serialize_issue_order(order_summary):
+    row = dict(order_summary or {})
+    merchant_order_id = row.get("merchant_order_id") or row.get("order_id")
+    awb = row.get("awb")
+    query = Q()
+    if merchant_order_id:
+        query |= Q(merchant_order_id=merchant_order_id) | Q(pa_order_id=merchant_order_id)
+    if awb:
+        query |= Q(shipment_id__awb=awb)
+    if query:
+        order = OrderInfo.objects.filter(query).order_by("-order_date").first()
+        if order:
+            row["payment_id"] = payment_id_for_order(order)
+    if not row.get("payment_id"):
+        stable_reference = (
+            row.get("pa_order_id")
+            or row.get("order_id")
+            or merchant_order_id
+            or awb
+        )
+        if stable_reference:
+            row["payment_id"] = numeric_payment_id(
+                f"merchant-issue-order:{stable_reference}:{awb or ''}"
+            )
+    return row
+
+
 def _serialize(issue):
     messages = list(issue.messages.all())
     last_message = messages[-1] if messages else None
@@ -40,7 +69,7 @@ def _serialize(issue):
         "merchant_email": issue.merchant_email,
         "issue_type": issue.issue_type,
         "issue_type_label": issue.get_issue_type_display(),
-        "orders": issue.orders,
+        "orders": [_serialize_issue_order(order) for order in (issue.orders or [])],
         "order_count": len(issue.orders or []),
         "description": issue.description,
         "status": issue.status,
