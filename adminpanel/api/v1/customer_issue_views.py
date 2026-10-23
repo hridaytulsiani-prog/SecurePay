@@ -5,6 +5,7 @@
     PATCH /adminpanel/customer-issues/<id>/            change the status
     POST  /adminpanel/customer-issues/<id>/messages/   a chat message ("sender": "admin" by default, "customer" to test)
     POST  /adminpanel/customer-issues/<id>/notes/      an internal note (admins only)
+    POST  /adminpanel/customer-issues/<id>/notify-merchant/ forward the issue to the responsible merchant
 """
 
 import json
@@ -12,7 +13,9 @@ import logging
 import os
 from datetime import timedelta
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.mail import EmailMessage
 from django.core.validators import validate_email
 from django.db.models import Count, Prefetch, Q
 from django.utils import timezone
@@ -20,9 +23,10 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView, Response
 
-from adminpanel.models import CustomerIssue, CustomerIssueAttachment, CustomerIssueMessage, CustomerIssueNote
+from adminpanel.models import CustomerIssue, CustomerIssueAttachment, CustomerIssueMessage, CustomerIssueMessageAttachment, CustomerIssueNote
 from adminpanel.permissions import AdminAPIView
 from adminpanel.api.v1.payment_ids import payment_id_for_order
+from payments.models.payment_lifecycle import PaymentNotification
 from payments.models.orderinfo import OrderInfo
 
 logger = logging.getLogger(__name__)
@@ -33,6 +37,9 @@ MAX_REPORTS_PER_IP_PER_HOUR = 5
 MAX_PHOTOS = 4
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_MESSAGE_ATTACHMENTS = 4
+MAX_MESSAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MESSAGE_ATTACHMENT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
 # The first bytes of real JPEG / PNG / WebP files (so a renamed file is not accepted as a photo).
 PHOTO_SIGNATURES = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"RIFF")
 # Problems where a photo is needed to look into it.
@@ -114,6 +121,17 @@ def _check_photos(issue_type, files):
 def _serialize(issue):
     messages = list(issue.messages.all())
     last = messages[-1] if messages else None
+    merchant_messages = [
+        message
+        for message in messages
+        if message.sender == CustomerIssueMessage.SENDER_MERCHANT
+        and message.channel == CustomerIssueMessage.CHANNEL_MERCHANT
+    ]
+    unread_merchant_messages = [
+        message
+        for message in merchant_messages
+        if issue.merchant_messages_read_at is None or message.created_at > issue.merchant_messages_read_at
+    ]
     order_summary = dict(issue.order or {})
     current_order = _find_order(issue.order_ref)
     if current_order:
@@ -140,13 +158,34 @@ def _serialize(issue):
             {
                 "id": m.id,
                 "sender": m.sender,
+                "channel": m.channel,
                 "body": m.body,
                 "admin_name": m.admin_user.username if m.admin_user else "",
+                "sender_name": (
+                    m.admin_user.username
+                    if m.sender == CustomerIssueMessage.SENDER_ADMIN and m.admin_user
+                    else order_summary.get("merchant_name", "Merchant")
+                    if m.sender == CustomerIssueMessage.SENDER_MERCHANT
+                    else issue.customer_name
+                ),
+                "attachments": [
+                    {
+                        "id": attachment.id,
+                        "url": attachment.file.url,
+                        "name": attachment.original_name,
+                        "content_type": attachment.content_type,
+                    }
+                    for attachment in m.attachments.all()
+                ],
                 "created_at": m.created_at,
             }
             for m in messages
         ],
         "awaiting_reply": bool(last and last.sender == CustomerIssueMessage.SENDER_CUSTOMER),
+        "merchant_responded": bool(merchant_messages),
+        "merchant_response_count": len(merchant_messages),
+        "merchant_response_unread": bool(unread_merchant_messages),
+        "merchant_response_unread_count": len(unread_merchant_messages),
         "notes": [
             {"id": n.id, "note": n.note, "admin_name": n.admin_user.username if n.admin_user else "", "created_at": n.created_at}
             for n in issue.notes.all()
@@ -159,7 +198,7 @@ def _serialize(issue):
 
 def _queryset():
     return CustomerIssue.objects.select_related("handled_by").prefetch_related(
-        Prefetch("messages", queryset=CustomerIssueMessage.objects.select_related("admin_user")),
+        Prefetch("messages", queryset=CustomerIssueMessage.objects.select_related("admin_user").prefetch_related("attachments")),
         Prefetch("notes", queryset=CustomerIssueNote.objects.select_related("admin_user")),
         "attachments",
     )
@@ -188,6 +227,7 @@ def _lookup_order(ref):
     return {
         "merchant_order_id": order.merchant_order_id,
         "merchant_id": order.merchant_id,
+        "merchant_email": order.merchant.merchant_email if order.merchant_id else "",
         "payment_id": payment_id_for_order(order),
         "awb": getattr(shipment, "awb", "") or "",
         "courier": getattr(shipment, "courier", "") or "",
@@ -291,14 +331,26 @@ class AdminCustomerIssueDetailView(AdminAPIView):
         issue = _queryset().filter(id=issue_id).first()
         if issue is None:
             return Response({"error": "Issue not found."}, status=status.HTTP_404_NOT_FOUND)
-        new_status = str(request.data.get("status") or "").strip()
-        if new_status not in VALID_STATUSES:
-            return Response({"error": "Invalid status."}, status=status.HTTP_400_BAD_REQUEST)
-        issue.status = new_status
-        issue.handled_by = request.admin_user
-        issue.handled_at = timezone.now()
-        issue.save()
-        return Response(_serialize(issue))
+        update_fields = []
+        if "status" in request.data:
+            new_status = str(request.data.get("status") or "").strip()
+            if new_status not in VALID_STATUSES:
+                return Response({"error": "Invalid status."}, status=status.HTTP_400_BAD_REQUEST)
+            issue.status = new_status
+            issue.handled_by = request.admin_user
+            issue.handled_at = timezone.now()
+            update_fields.extend(["status", "handled_by", "handled_at"])
+
+        if str(request.data.get("merchant_messages_read") or "").strip().lower() in {"true", "1", "yes"}:
+            issue.merchant_messages_read_at = timezone.now()
+            update_fields.append("merchant_messages_read_at")
+
+        if not update_fields:
+            return Response({"error": "No supported changes were supplied."}, status=status.HTTP_400_BAD_REQUEST)
+
+        update_fields.append("updated_at")
+        issue.save(update_fields=update_fields)
+        return Response(_serialize(_queryset().get(id=issue.id)))
 
 
 class AdminCustomerIssueMessageView(AdminAPIView):
@@ -309,18 +361,35 @@ class AdminCustomerIssueMessageView(AdminAPIView):
         if issue is None:
             return Response({"error": "Issue not found."}, status=status.HTTP_404_NOT_FOUND)
         body = str(request.data.get("body") or "").strip()
-        if not body:
-            return Response({"error": "Write a message first."}, status=status.HTTP_400_BAD_REQUEST)
+        attachments = request.FILES.getlist("attachments")
+        if not body and not attachments:
+            return Response({"error": "Write a message or attach a file first."}, status=status.HTTP_400_BAD_REQUEST)
         if len(body) > MAX_TEXT:
             return Response({"error": f"A message must be {MAX_TEXT} characters or fewer."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(attachments) > MAX_MESSAGE_ATTACHMENTS:
+            return Response({"error": f"You can attach up to {MAX_MESSAGE_ATTACHMENTS} files."}, status=status.HTTP_400_BAD_REQUEST)
+        for upload in attachments:
+            if os.path.splitext(upload.name)[1].lower() not in MESSAGE_ATTACHMENT_EXTENSIONS:
+                return Response({"error": "Attachments must be JPG, PNG, WebP or PDF files."}, status=status.HTTP_400_BAD_REQUEST)
+            if upload.size > MAX_MESSAGE_ATTACHMENT_BYTES:
+                return Response({"error": "Each attachment must be 10 MB or smaller."}, status=status.HTTP_400_BAD_REQUEST)
 
         from_customer = str(request.data.get("sender") or "").strip() == CustomerIssueMessage.SENDER_CUSTOMER
-        CustomerIssueMessage.objects.create(
+        to_merchant = str(request.data.get("channel") or "").strip() == CustomerIssueMessage.CHANNEL_MERCHANT
+        message = CustomerIssueMessage.objects.create(
             issue=issue,
             sender=CustomerIssueMessage.SENDER_CUSTOMER if from_customer else CustomerIssueMessage.SENDER_ADMIN,
+            channel=CustomerIssueMessage.CHANNEL_MERCHANT if to_merchant and not from_customer else CustomerIssueMessage.CHANNEL_CUSTOMER,
             body=body,
             admin_user=None if from_customer else request.admin_user,
         )
+        for upload in attachments:
+            CustomerIssueMessageAttachment.objects.create(
+                message=message,
+                file=upload,
+                original_name=os.path.basename(upload.name)[:200],
+                content_type=(getattr(upload, "content_type", "") or "")[:100],
+            )
         if not from_customer:
             if issue.status == CustomerIssue.STATUS_NEW:
                 issue.status = CustomerIssue.STATUS_IN_PROGRESS
@@ -344,6 +413,182 @@ class AdminCustomerIssueNoteView(AdminAPIView):
             return Response({"error": f"A note must be {MAX_TEXT} characters or fewer."}, status=status.HTTP_400_BAD_REQUEST)
         CustomerIssueNote.objects.create(issue=issue, note=text, admin_user=request.admin_user)
         return Response(_serialize(_queryset().get(id=issue.id)), status=status.HTTP_201_CREATED)
+
+
+class AdminCustomerIssueMerchantNotifyView(AdminAPIView):
+    """Forward a customer issue to the merchant as both a portal notification and an email."""
+
+    required_permission = "contact_messages.manage"
+
+    def post(self, request, issue_id):
+        issue = _queryset().filter(id=issue_id).first()
+        if issue is None:
+            return Response({"error": "Issue not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        order = (
+            OrderInfo.objects.select_related("merchant", "customer_info")
+            .filter(
+                Q(merchant_order_id=issue.order_ref)
+                | Q(pa_order_id=issue.order_ref)
+                | Q(shipment_id__awb=issue.order_ref)
+            )
+            .order_by("-order_date")
+            .first()
+        )
+        if order is None or order.merchant_id is None:
+            return Response(
+                {"error": "No responsible merchant could be found for this customer issue."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        requested_note_ids = request.data.get("public_call_note_ids", [])
+        if not isinstance(requested_note_ids, list):
+            return Response(
+                {"error": "public_call_note_ids must be a list."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        selected_note_ids = {
+            int(note_id)
+            for note_id in requested_note_ids[:20]
+            if str(note_id).isdigit()
+        }
+        selected_call_notes = [
+            note.note[len("[call-note]"):].strip()
+            for note in issue.notes.filter(id__in=selected_note_ids).order_by("created_at")
+            if note.note.startswith("[call-note]") and note.note[len("[call-note]"):].strip()
+        ]
+
+        title = "Customer issue requires your attention"
+        message = (
+            f"EscroSafe forwarded customer issue {issue.reference} for Order ID "
+            f"{order.merchant_order_id}: {issue.get_issue_type_display()}. "
+            "Please review the order and contact EscroSafe if action is needed."
+        )
+        if selected_call_notes:
+            message += " Customer call notes: " + " | ".join(selected_call_notes)
+        metadata = {
+            "source": "admin_customer_issue",
+            "customer_issue_id": issue.id,
+            "issue_reference": issue.reference,
+            "issue_type": issue.get_issue_type_display(),
+            "customer_name": issue.customer_name,
+            "public_call_notes": selected_call_notes,
+        }
+        now = timezone.now()
+        dashboard_notification, portal_created = PaymentNotification.objects.get_or_create(
+            dedupe_key=f"DASHBOARD:customer_issue_forwarded:{issue.id}",
+            defaults={
+                "merchant": order.merchant,
+                "order": order,
+                "event_type": "customer_issue_forwarded",
+                "channel": PaymentNotification.CHANNEL_DASHBOARD,
+                "title": title,
+                "message": message,
+                "status": PaymentNotification.STATUS_SENT,
+                "metadata": metadata,
+                "sent_at": now,
+            },
+        )
+        if selected_call_notes and not portal_created:
+            dashboard_notification.message = message
+            dashboard_notification.metadata = {**(dashboard_notification.metadata or {}), **metadata}
+            dashboard_notification.save(update_fields=["message", "metadata"])
+
+        if selected_call_notes:
+            shared_notes_message = "Customer call notes shared by EscroSafe:\n\n" + "\n".join(
+                f"{index}. {note}" for index, note in enumerate(selected_call_notes, start=1)
+            )
+            CustomerIssueMessage.objects.get_or_create(
+                issue=issue,
+                sender=CustomerIssueMessage.SENDER_ADMIN,
+                channel=CustomerIssueMessage.CHANNEL_MERCHANT,
+                body=shared_notes_message[:MAX_TEXT],
+                defaults={"admin_user": request.admin_user},
+            )
+
+        email_notification, _ = PaymentNotification.objects.get_or_create(
+            dedupe_key=f"EMAIL:customer_issue_forwarded:{issue.id}",
+            defaults={
+                "merchant": order.merchant,
+                "order": order,
+                "event_type": "customer_issue_forwarded",
+                "channel": PaymentNotification.CHANNEL_EMAIL,
+                "title": f"{title} - {order.merchant_order_id}",
+                "message": message,
+                "status": PaymentNotification.STATUS_PENDING,
+                "metadata": metadata,
+            },
+        )
+
+        merchant_email = (order.merchant.merchant_email or "").strip()
+        email_already_sent = email_notification.status == PaymentNotification.STATUS_SENT
+        email_sent = email_already_sent
+        email_error = ""
+        if not email_sent and merchant_email:
+            email_lines = [
+                    f"Hello {order.merchant.merchant_name},",
+                    "",
+                    "A customer issue has been forwarded for your attention.",
+                    "",
+                    f"Ticket ID: {issue.reference}",
+                    f"Order ID: {order.merchant_order_id}",
+                    f"Issue: {issue.get_issue_type_display()}",
+                    f"Customer: {issue.customer_name}",
+                    f"Customer report: {issue.description}",
+                    "",
+            ]
+            if selected_call_notes:
+                email_lines.extend(
+                    ["Customer call notes selected by EscroSafe:"]
+                    + [f"{index}. {note}" for index, note in enumerate(selected_call_notes, start=1)]
+                    + [""]
+                )
+            email_lines.extend(
+                [
+                    "Please review this order in your EscroSafe merchant portal and coordinate with EscroSafe if action is required.",
+                    "",
+                    "EscroSafe Support",
+                ]
+            )
+            email_body = "\n".join(email_lines)
+            partnerships_email = getattr(settings, "PARTNERSHIPS_EMAIL", "partnerships@escrosafe.com")
+            cc = [partnerships_email] if partnerships_email and partnerships_email.lower() != merchant_email.lower() else []
+            try:
+                EmailMessage(
+                    subject=email_notification.title,
+                    body=email_body,
+                    from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                    to=[merchant_email],
+                    cc=cc,
+                ).send(fail_silently=False)
+                email_notification.status = PaymentNotification.STATUS_SENT
+                email_notification.sent_at = now
+                email_notification.metadata = {**metadata, "cc": cc}
+                email_notification.save(update_fields=["status", "sent_at", "metadata"])
+                email_sent = True
+            except Exception as exc:
+                logger.exception("Failed to email customer issue %s to merchant %s", issue.reference, order.merchant_id)
+                email_error = "The portal notification was sent, but the merchant email could not be delivered."
+                email_notification.status = PaymentNotification.STATUS_FAILED
+                email_notification.metadata = {**metadata, "error": str(exc)}
+                email_notification.save(update_fields=["status", "metadata"])
+        elif not merchant_email:
+            email_error = "The portal notification was sent, but this merchant does not have an email address."
+
+        return Response(
+            {
+                "ok": True,
+                "already_notified": not portal_created and email_already_sent,
+                "portal_sent": dashboard_notification.status == PaymentNotification.STATUS_SENT,
+                "email_sent": email_sent,
+                "email_error": email_error,
+                "merchant_name": order.merchant.merchant_name,
+                "merchant_email": merchant_email,
+                "order_id": order.merchant_order_id,
+                "issue_reference": issue.reference,
+            },
+            status=status.HTTP_201_CREATED if portal_created else status.HTTP_200_OK,
+        )
 
 
 class CustomerIssueSubmitView(APIView):

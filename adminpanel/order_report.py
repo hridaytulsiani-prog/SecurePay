@@ -511,3 +511,27 @@ def pa_status_for(order):
     if state in PAYMENT_RECEIVED:
         return "Held"
     return _pretty(state)
+
+
+def pa_control_for(order):
+    """Small live PA snapshot used by the order-report decision controls."""
+    from payments.models.pa_control import PAProtectedOrder
+    from payments.services.pa_control import ensure_protected_order_for_order, finalize_scheduled_aggregator_request
+
+    protected = PAProtectedOrder.objects.filter(order=order).first()
+    if protected is None:
+        protected = ensure_protected_order_for_order(order)
+    protected = finalize_scheduled_aggregator_request(protected)
+    command = getattr(protected, "financial_command", None)
+    return {
+        "vaultpay_order_id": protected.vaultpay_order_id,
+        "decision_state": protected.decision_state,
+        "aggregator_request": (protected.metadata or {}).get("aggregator_request"),
+        "decision_window": (protected.metadata or {}).get("decision_window"),
+        "command": None
+        if command is None
+        else {
+            "decision": command.decision,
+            "status": command.status,
+        },
+    }

@@ -26,6 +26,7 @@ from adminpanel.api.v1.customer_issue_views import (
     AdminCustomerIssueDetailView,
     AdminCustomerIssueListView,
     AdminCustomerIssueMessageView,
+    AdminCustomerIssueMerchantNotifyView,
     AdminCustomerIssueNoteView,
     CustomerIssueSubmitView,
 )
@@ -163,6 +164,7 @@ urlpatterns = [
     path("customer-issues/<int:issue_id>/", AdminCustomerIssueDetailView.as_view(), name="admin-customer-issue-detail"),
     path("customer-issues/<int:issue_id>/notes/", AdminCustomerIssueNoteView.as_view(), name="admin-customer-issue-notes"),
     path("customer-issues/<int:issue_id>/messages/", AdminCustomerIssueMessageView.as_view(), name="admin-customer-issue-messages"),
+    path("customer-issues/<int:issue_id>/notify-merchant/", AdminCustomerIssueMerchantNotifyView.as_view(), name="admin-customer-issue-notify-merchant"),
     path("merchant-issues/", AdminMerchantIssueListView.as_view(), name="admin-merchant-issues"),
     path("merchant-issues/<int:issue_id>/", AdminMerchantIssueDetailView.as_view(), name="admin-merchant-issue-detail"),
     path("merchant-issues/<int:issue_id>/report/", AdminMerchantIssueOrderReportView.as_view(), name="admin-merchant-issue-report"),

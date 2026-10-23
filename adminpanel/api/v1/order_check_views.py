@@ -15,6 +15,7 @@ from adminpanel.api.v1.customer_issue_views import customer_issues_for_order
 from adminpanel.api.v1.payment_ids import payment_id_for_order
 from adminpanel.models import ContactMessage, MerchantIssue
 from adminpanel.order_check import build_order_check
+from adminpanel.order_report import pa_control_for
 from adminpanel.permissions import AdminAPIView
 from payments.models.orderinfo import OrderInfo
 
@@ -90,4 +91,5 @@ class AdminOrderCheckView(AdminAPIView):
         payload["order"]["payment_id"] = payment_id_for_order(order)
         payload["contact_messages"] = contact_messages
         payload["customer_issues"] = customer_issues_for_order(order)
+        payload["pa_control"] = pa_control_for(order)
         return Response(payload)

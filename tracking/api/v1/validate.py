@@ -16,7 +16,7 @@ import threading
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
 
-import fitz
+import pymupdf as fitz
 from django.conf import settings
 from django.utils.text import get_valid_filename
 from django.db.models import Q

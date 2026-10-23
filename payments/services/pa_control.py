@@ -1,7 +1,10 @@
+from datetime import datetime
 from decimal import Decimal
 import re
+import threading
 from uuid import uuid4
 
+from django.db import close_old_connections
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.conf import settings
@@ -24,6 +27,7 @@ from tracking.models.delhivery_verification_decision import DelhiveryVerificatio
 
 
 PDF_UPLOAD_REFUND_DEADLINE_DAYS = 21
+DECISION_REVOCATION_WINDOW_SECONDS = 10 * 60
 SHIPROCKET_ALIASES = ("shiprocket", "ship rocket")
 
 
@@ -72,6 +76,13 @@ def send_aggregator_request(protected_order, decision, actor=None):
     if decision not in {PAProtectedOrder.DECISION_RELEASE, PAProtectedOrder.DECISION_REFUND}:
         raise ValueError("decision must be RELEASE or REFUND")
 
+    existing_request = (protected_order.metadata or {}).get("aggregator_request") or {}
+    existing_decision = str(existing_request.get("decision") or "").upper()
+    if existing_decision:
+        if existing_decision == decision:
+            return protected_order
+        raise ValueError(f"A {existing_decision.lower()} request has already been sent for this order.")
+
     now = timezone.now()
     metadata = dict(protected_order.metadata or {})
     metadata["aggregator_request"] = {
@@ -93,6 +104,118 @@ def send_aggregator_request(protected_order, decision, actor=None):
     )
     prepare_financial_command(protected_order)
     return protected_order
+
+
+def _decision_window_deadline(window):
+    value = window.get("send_at")
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+@transaction.atomic
+def finalize_scheduled_aggregator_request(protected_order, force=False):
+    protected_order = PAProtectedOrder.objects.select_for_update().get(pk=protected_order.pk)
+    metadata = dict(protected_order.metadata or {})
+    if metadata.get("aggregator_request"):
+        return protected_order
+    window = dict(metadata.get("decision_window") or {})
+    if window.get("status") != "PENDING":
+        return protected_order
+    deadline = _decision_window_deadline(window)
+    if not force and (deadline is None or deadline > timezone.now()):
+        return protected_order
+
+    decision = window.get("decision")
+    send_aggregator_request(protected_order, decision, actor=None)
+    protected_order.refresh_from_db()
+    metadata = dict(protected_order.metadata or {})
+    metadata["decision_window"] = {
+        **window,
+        "status": "SENT",
+        "sent_at": timezone.now().isoformat(),
+    }
+    protected_order.metadata = metadata
+    protected_order.save(update_fields=["metadata", "updated_at"])
+    audit(protected_order, "DECISION_WINDOW_COMPLETED", f"{decision} decision window completed", metadata["decision_window"])
+    return protected_order
+
+
+def _finalize_scheduled_order(protected_order_id):
+    close_old_connections()
+    try:
+        protected_order = PAProtectedOrder.objects.filter(pk=protected_order_id).first()
+        if protected_order:
+            finalize_scheduled_aggregator_request(protected_order)
+    finally:
+        close_old_connections()
+
+
+def schedule_aggregator_request(protected_order, decision, actor=None):
+    decision = str(decision or "").upper()
+    if decision not in {PAProtectedOrder.DECISION_RELEASE, PAProtectedOrder.DECISION_REFUND}:
+        raise ValueError("decision must be RELEASE or REFUND")
+
+    protected_order.refresh_from_db()
+    metadata = dict(protected_order.metadata or {})
+    if metadata.get("aggregator_request"):
+        sent_decision = str(metadata["aggregator_request"].get("decision") or "").lower()
+        raise ValueError(f"A {sent_decision} request has already been sent for this order.")
+    current_window = metadata.get("decision_window") or {}
+    if current_window.get("status") == "PENDING":
+        raise ValueError("Revoke the current decision before choosing another one.")
+
+    now = timezone.now()
+    send_at = now + timezone.timedelta(seconds=DECISION_REVOCATION_WINDOW_SECONDS)
+    metadata["decision_window"] = {
+        "decision": decision,
+        "status": "PENDING",
+        "staged_at": now.isoformat(),
+        "send_at": send_at.isoformat(),
+        "staged_by": getattr(actor, "username", "") if actor else "",
+    }
+    protected_order.metadata = metadata
+    protected_order.save(update_fields=["metadata", "updated_at"])
+    audit(protected_order, "DECISION_WINDOW_STARTED", f"{decision} decision staged for 10 minutes", metadata["decision_window"])
+
+    timer = threading.Timer(DECISION_REVOCATION_WINDOW_SECONDS, _finalize_scheduled_order, args=(protected_order.pk,))
+    timer.daemon = True
+    timer.start()
+    return protected_order
+
+
+@transaction.atomic
+def revoke_scheduled_aggregator_request(protected_order, actor=None):
+    protected_order = PAProtectedOrder.objects.select_for_update().get(pk=protected_order.pk)
+    metadata = dict(protected_order.metadata or {})
+    if metadata.get("aggregator_request"):
+        raise ValueError("This request has already been sent and can no longer be revoked.")
+    window = dict(metadata.get("decision_window") or {})
+    if window.get("status") != "PENDING":
+        raise ValueError("There is no pending decision to revoke.")
+    deadline = _decision_window_deadline(window)
+    if deadline is None or deadline <= timezone.now():
+        raise ValueError("The 10-minute decision window has ended; the request can no longer be revoked.")
+
+    metadata["decision_window"] = {
+        **window,
+        "status": "REVOKED",
+        "revoked_at": timezone.now().isoformat(),
+        "revoked_by": getattr(actor, "username", "") if actor else "",
+    }
+    protected_order.metadata = metadata
+    protected_order.save(update_fields=["metadata", "updated_at"])
+    audit(protected_order, "DECISION_WINDOW_REVOKED", f"{window.get('decision')} decision revoked", metadata["decision_window"])
+    return protected_order
+
+
+def finalize_due_aggregator_requests():
+    rows = PAProtectedOrder.objects.filter(metadata__decision_window__status="PENDING")
+    for protected_order in rows.iterator():
+        finalize_scheduled_aggregator_request(protected_order)
 
 
 def _pdf_missing_refund_due(protected_order, pdf_evidence):
@@ -752,6 +875,7 @@ def serialize_order(protected_order):
         "pdf_verification": pdf_evidence,
         "courier_verification": courier_decision,
         "aggregator_request": (protected_order.metadata or {}).get("aggregator_request"),
+        "decision_window": (protected_order.metadata or {}).get("decision_window"),
         "capability": serialize_capability(capability),
         "command": None
         if not command

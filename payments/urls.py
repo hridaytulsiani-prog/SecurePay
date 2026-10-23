@@ -11,6 +11,8 @@ from payments.api.v1.generate_order import (
     ShipmentListView,
     SavedShipmentTrackingView,
     MerchantNotificationListView,
+    MerchantForwardedCustomerIssueListView,
+    MerchantForwardedCustomerIssueMessageView,
 )
 from payments.api.v1.phonepe import PhonePeCallbackView, PhonePeInitiateView, PhonePeReturnView
 from payments.api.v1.payment_lifecycle import PaymentWebhookView, SettlementRunView
@@ -24,6 +26,8 @@ urlpatterns = [
     path('v1/shipments/', ShipmentListView.as_view(), name='shipment-list'),
     path('v1/shipments/<str:awb>/tracking/', SavedShipmentTrackingView.as_view(), name='saved-shipment-tracking'),
     path('v1/notifications/', MerchantNotificationListView.as_view(), name='merchant-notifications'),
+    path('v1/customer-issues/', MerchantForwardedCustomerIssueListView.as_view(), name='merchant-forwarded-customer-issues'),
+    path('v1/customer-issues/<int:issue_id>/messages/', MerchantForwardedCustomerIssueMessageView.as_view(), name='merchant-forwarded-customer-issue-messages'),
     path('v1/orders/create/', CreateManualOrder.as_view(), name='manual-order-create'),
     path("v1/checkout-sessions/", CheckoutSessionView.as_view(), name="checkout-session-create"),
     path("v1/checkout-sessions/<str:session_id>/", CheckoutSessionDetailView.as_view(), name="checkout-session-detail"),

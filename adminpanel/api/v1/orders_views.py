@@ -326,6 +326,43 @@ def attach_issue_status(rows):
         )
 
 
+def _normalized_order_state(value):
+    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _order_state_includes(value, terms):
+    state = _normalized_order_state(value)
+    return any(term in state for term in terms)
+
+
+def order_row_tone(row):
+    """Return the same four-state colour used by the admin Orders table."""
+    failure_terms = (
+        "failed", "rejected", "not_approved", "cancelled", "canceled",
+        "lost", "damaged", "returned", "rto", "refund",
+    )
+    has_failure = any(
+        _order_state_includes(row.get(field), failure_terms)
+        for field in ("payment_state", "order_status", "shipment_id__status", "shipment_label_status")
+    ) or _normalized_order_state(row.get("verification_status")) == "not_verified"
+
+    if row.get("issue_status") == "open" or has_failure:
+        return "failed"
+    if row.get("issue_status") == "in_progress":
+        return "pending"
+    if row.get("issue_status") == "resolved":
+        return "resolved"
+
+    payment_complete = _order_state_includes(
+        row.get("payment_state") or row.get("order_status"),
+        ("paid", "success", "captured", "settled", "completed", "released"),
+    )
+    delivery_complete = _order_state_includes(row.get("shipment_id__status"), ("delivered", "completed"))
+    label_approved = _normalized_order_state(row.get("shipment_label_status")) in ("approved", "shipment_linked")
+    courier_verified = _normalized_order_state(row.get("verification_status")) == "verified"
+    return "success" if payment_complete and delivery_complete and label_approved and courier_verified else "pending"
+
+
 class AdminOrderListView(AdminAPIView):
     """Paginated, searchable list of every order across all merchants."""
     required_permission = "orders.view"
@@ -349,6 +386,8 @@ class AdminOrderListView(AdminAPIView):
         courier_filter = (request.GET.get("courier") or "").strip()
         delivery_status_filter = (request.GET.get("delivery_status") or "").strip()
         shipment_label_status = (request.GET.get("shipment_label_status") or "").strip().lower()
+        row_tone = (request.GET.get("row_tone") or "").strip().lower()
+        order_scope = (request.GET.get("scope") or "all").strip().lower()
         sort_order = (request.GET.get("sort") or "newest").strip().lower()
         order_by = "order_date" if sort_order == "oldest" else "-order_date"
 
@@ -427,11 +466,20 @@ class AdminOrderListView(AdminAPIView):
         attach_shipment_label_status(rows, request=request)
         attach_verification_decisions(rows)
         attach_issue_status(rows)
+        for row in rows:
+            row["row_tone"] = order_row_tone(row)
         if shipment_label_status:
             rows = [
                 row
                 for row in rows
                 if (row.get("shipment_label_status") or "").lower() == shipment_label_status
+            ]
+        if row_tone in {"success", "pending", "failed", "resolved"}:
+            rows = [row for row in rows if row.get("row_tone") == row_tone]
+        if order_scope == "completed":
+            rows = [
+                row for row in rows
+                if row.get("row_tone") in {"success", "resolved"}
             ]
 
         total = len(rows)

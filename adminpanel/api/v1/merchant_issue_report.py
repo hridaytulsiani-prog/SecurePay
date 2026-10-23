@@ -16,7 +16,7 @@ from rest_framework.views import Response
 from adminpanel.api.v1.customer_issue_views import customer_issues_for_order
 from adminpanel.api.v1.merchant_issue_views import _issues_queryset
 from adminpanel.models import MerchantIssueMessage
-from adminpanel.order_report import build_order_report, pa_status_for
+from adminpanel.order_report import build_order_report, pa_control_for, pa_status_for
 from adminpanel.permissions import AdminAPIView
 from payments.models.orderinfo import OrderInfo
 
@@ -146,5 +146,6 @@ class AdminMerchantIssueOrderReportView(AdminAPIView):
                 "courier": report.get("courier", {}),
                 "customer": report.get("customer", {}),
                 "payment": report.get("payment", {}),
+                "pa_control": pa_control_for(order),
             }
         )

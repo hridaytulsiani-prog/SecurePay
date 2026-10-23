@@ -629,7 +629,7 @@ class MerchantNotificationListView(View):
         PaymentNotification.objects.filter(
             merchant_id=merchant_id,
             created_at__lt=retention_cutoff,
-        ).delete()
+        ).exclude(event_type="customer_issue_forwarded").delete()
 
         notifications = [
             {
@@ -666,6 +666,10 @@ class MerchantNotificationListView(View):
                 "customer_name": item.order.customer_info.customer_name if item.order and item.order.customer_info else "",
                 "created_at": item.created_at.isoformat(),
                 "payment_state": item.order.payment_state if item.order else "",
+                "issue_reference": (item.metadata or {}).get("issue_reference", ""),
+                "issue_type": (item.metadata or {}).get("issue_type", ""),
+                "source": (item.metadata or {}).get("source", ""),
+                "customer_issue_id": (item.metadata or {}).get("customer_issue_id"),
             }
             for item in payment_notifications
         )
@@ -731,3 +735,173 @@ class MerchantNotificationListView(View):
                 }
             )
         return notifications
+
+
+class MerchantForwardedCustomerIssueListView(View):
+    """Customer issues an admin explicitly forwarded to this merchant."""
+
+    def get(self, request, *args, **kwargs):
+        auth_token = _get_auth_token_from_request(request)
+        merchant_id = get_merchant_id_from_token(auth_token)
+        if merchant_id is None:
+            return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
+
+        notifications = list(
+            PaymentNotification.objects.filter(
+                merchant_id=merchant_id,
+                channel=PaymentNotification.CHANNEL_DASHBOARD,
+                event_type="customer_issue_forwarded",
+            )
+            .select_related("order", "order__shipment_id")
+            .order_by("-created_at")
+        )
+        issue_ids = [
+            (notification.metadata or {}).get("customer_issue_id")
+            for notification in notifications
+            if (notification.metadata or {}).get("customer_issue_id")
+        ]
+
+        # Imported here to keep the merchant payments module independent at import time.
+        from adminpanel.models import CustomerIssue
+
+        issues = {
+            issue.id: issue
+            for issue in CustomerIssue.objects.filter(id__in=issue_ids).prefetch_related(
+                "attachments", "messages__attachments", "messages__admin_user"
+            )
+        }
+        results = []
+        for notification in notifications:
+            issue_id = (notification.metadata or {}).get("customer_issue_id")
+            issue = issues.get(issue_id)
+            if issue is None:
+                continue
+            order = notification.order
+            shipment = order.shipment_id if order else None
+            results.append(
+                {
+                    "id": issue.id,
+                    "reference": issue.reference,
+                    "order_id": order.merchant_order_id if order else issue.order_ref,
+                    "payment_id": order.pa_order_id if order else "",
+                    "merchant_name": order.merchant.merchant_name if order and order.merchant_id else "Merchant",
+                    "merchant_email": order.merchant.merchant_email if order and order.merchant_id else "",
+                    "awb": getattr(shipment, "awb", "") or "",
+                    "courier": getattr(shipment, "courier", "") or "",
+                    "delivery_status": getattr(shipment, "status", "") or "",
+                    "customer_name": issue.customer_name,
+                    "issue_type": issue.issue_type,
+                    "issue_type_label": issue.get_issue_type_display(),
+                    "description": issue.description,
+                    "details": issue.details or [],
+                    "evidence_count": issue.attachments.count(),
+                    "attachments": [
+                        {
+                            "id": attachment.id,
+                            "url": attachment.file.url,
+                            "name": attachment.original_name,
+                        }
+                        for attachment in issue.attachments.all()
+                    ],
+                    "messages": [
+                        {
+                            "id": message.id,
+                            "sender": message.sender,
+                            "channel": message.channel,
+                            "sender_name": (
+                                order.merchant.merchant_name
+                                if message.sender == "merchant" and order and order.merchant_id
+                                else message.admin_user.username
+                                if message.sender == "admin" and message.admin_user
+                                else "EscroSafe"
+                            ),
+                            "body": message.body,
+                            "created_at": message.created_at.isoformat(),
+                            "attachments": [
+                                {
+                                    "id": attachment.id,
+                                    "url": attachment.file.url,
+                                    "name": attachment.original_name,
+                                    "content_type": attachment.content_type,
+                                }
+                                for attachment in message.attachments.all()
+                            ],
+                        }
+                        for message in issue.messages.all()
+                        if message.channel == "merchant" and message.sender in {"merchant", "admin"}
+                    ],
+                    "merchant_responded": issue.messages.filter(sender="merchant", channel="merchant").exists(),
+                    "status": issue.status,
+                    "status_label": issue.get_status_display(),
+                    "raised_at": issue.created_at.isoformat(),
+                    "forwarded_at": notification.created_at.isoformat(),
+                }
+            )
+
+        return JsonResponse({"results": results, "total": len(results)})
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class MerchantForwardedCustomerIssueMessageView(View):
+    """Add a merchant reply, with optional image/PDF evidence, to a forwarded customer issue."""
+
+    MAX_ATTACHMENTS = 4
+    MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+    ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
+
+    def post(self, request, issue_id, *args, **kwargs):
+        auth_token = _get_auth_token_from_request(request)
+        merchant_id = get_merchant_id_from_token(auth_token)
+        if merchant_id is None:
+            return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
+
+        notification = PaymentNotification.objects.filter(
+            merchant_id=merchant_id,
+            channel=PaymentNotification.CHANNEL_DASHBOARD,
+            event_type="customer_issue_forwarded",
+            metadata__customer_issue_id=issue_id,
+        ).first()
+        if notification is None:
+            return JsonResponse({"error": "Customer issue not found."}, status=404)
+
+        from adminpanel.models import CustomerIssue, CustomerIssueMessage, CustomerIssueMessageAttachment
+
+        issue = CustomerIssue.objects.filter(id=issue_id).first()
+        if issue is None:
+            return JsonResponse({"error": "Customer issue not found."}, status=404)
+
+        body = str(request.POST.get("body") or "").strip()
+        attachments = request.FILES.getlist("attachments")
+        if not body and not attachments:
+            return JsonResponse({"error": "Write a message or attach a file first."}, status=400)
+        if len(body) > 2000:
+            return JsonResponse({"error": "A message must be 2000 characters or fewer."}, status=400)
+        if len(attachments) > self.MAX_ATTACHMENTS:
+            return JsonResponse({"error": f"You can attach up to {self.MAX_ATTACHMENTS} files."}, status=400)
+
+        for upload in attachments:
+            extension = os.path.splitext(upload.name)[1].lower()
+            if extension not in self.ALLOWED_EXTENSIONS:
+                return JsonResponse({"error": "Attachments must be JPG, PNG, WebP or PDF files."}, status=400)
+            if upload.size > self.MAX_ATTACHMENT_BYTES:
+                return JsonResponse({"error": "Each attachment must be 10 MB or smaller."}, status=400)
+
+        message = CustomerIssueMessage.objects.create(
+            issue=issue,
+            sender=CustomerIssueMessage.SENDER_MERCHANT,
+            channel=CustomerIssueMessage.CHANNEL_MERCHANT,
+            body=body,
+        )
+        for upload in attachments:
+            CustomerIssueMessageAttachment.objects.create(
+                message=message,
+                file=upload,
+                original_name=os.path.basename(upload.name)[:200],
+                content_type=(getattr(upload, "content_type", "") or "")[:100],
+            )
+
+        if issue.status == CustomerIssue.STATUS_RESOLVED:
+            issue.status = CustomerIssue.STATUS_IN_PROGRESS
+            issue.save(update_fields=["status", "updated_at"])
+
+        return JsonResponse({"ok": True, "message_id": message.id}, status=201)

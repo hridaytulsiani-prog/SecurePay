@@ -4,7 +4,7 @@ import tempfile
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-import fitz
+import pymupdf as fitz
 from pypdf import PdfReader
 
 from tracking.api.v1.label_validator import validate_label

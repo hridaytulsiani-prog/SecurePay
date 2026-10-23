@@ -1,10 +1,86 @@
 # K-means color-clustering used by validate.py's Delhivery color-fingerprint
 # fallback (see DELHIVERY_FINGERPRINT_COLORS there) when a label's courier
 # can't be identified from text/logo alone.
-import fitz
+import pymupdf as fitz
 import numpy as np
 from PIL import Image
-from sklearn.cluster import KMeans
+
+
+def _cluster_rgb_colors(pixels, n_clusters, random_state=42, n_init=10, max_iter=100):
+    """Cluster RGB pixels using weighted, NumPy-only k-means.
+
+    Working with unique colors makes this substantially cheaper than running
+    k-means over every rendered pixel while producing the same weighted
+    centroids and cluster sizes.  Keeping this implementation local also
+    avoids importing scikit-learn's native DLLs during Django startup.
+    """
+    unique_pixels, pixel_counts = np.unique(pixels, axis=0, return_counts=True)
+    points = unique_pixels.astype(np.float64)
+    weights = pixel_counts.astype(np.float64)
+    cluster_count = min(int(n_clusters), len(points))
+
+    if cluster_count < 1:
+        return np.empty((0, 3), dtype=np.float64), np.empty(0, dtype=np.int64)
+
+    best_centers = None
+    best_labels = None
+    best_inertia = np.inf
+    base_rng = np.random.RandomState(random_state)
+
+    for _ in range(max(1, int(n_init))):
+        rng = np.random.RandomState(base_rng.randint(0, np.iinfo(np.int32).max))
+
+        # Weighted k-means++ initialization. Each unique RGB value represents
+        # pixel_counts[i] original pixels.
+        first_index = rng.choice(len(points), p=weights / weights.sum())
+        centers = [points[first_index].copy()]
+        closest_dist_sq = np.sum((points - centers[0]) ** 2, axis=1)
+
+        for _cluster_index in range(1, cluster_count):
+            probabilities = weights * closest_dist_sq
+            probability_sum = probabilities.sum()
+            if probability_sum <= 0:
+                selected = {tuple(center) for center in centers}
+                next_index = next(
+                    index for index, point in enumerate(points) if tuple(point) not in selected
+                )
+            else:
+                next_index = rng.choice(len(points), p=probabilities / probability_sum)
+            centers.append(points[next_index].copy())
+            new_dist_sq = np.sum((points - centers[-1]) ** 2, axis=1)
+            closest_dist_sq = np.minimum(closest_dist_sq, new_dist_sq)
+
+        centers = np.asarray(centers)
+        for _iteration in range(max_iter):
+            distances = np.sum((points[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+            labels = np.argmin(distances, axis=1)
+            new_centers = centers.copy()
+
+            for cluster_index in range(cluster_count):
+                mask = labels == cluster_index
+                if np.any(mask):
+                    new_centers[cluster_index] = np.average(
+                        points[mask], axis=0, weights=weights[mask]
+                    )
+
+            if np.allclose(new_centers, centers, atol=1e-3, rtol=0):
+                centers = new_centers
+                break
+            centers = new_centers
+
+        distances = np.sum((points[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        labels = np.argmin(distances, axis=1)
+        inertia = np.sum(weights * distances[np.arange(len(points)), labels])
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_centers = centers
+            best_labels = labels
+
+    cluster_sizes = np.bincount(
+        best_labels, weights=pixel_counts, minlength=cluster_count
+    ).astype(np.int64)
+    nonempty = cluster_sizes > 0
+    return best_centers[nonempty], cluster_sizes[nonempty]
 
 
 def rgb_to_hex(rgb):
@@ -71,12 +147,7 @@ def extract_major_colors_from_pdf(
 
         combined_pixels.append(working_pixels)
 
-        k = min(colors_per_page, len(working_pixels))
-        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(working_pixels)
-        centers = kmeans.cluster_centers_
-
-        counts = np.bincount(labels)
+        centers, counts = _cluster_rgb_colors(working_pixels, colors_per_page)
         total = counts.sum()
 
         colors = []
@@ -96,11 +167,7 @@ def extract_major_colors_from_pdf(
     combined_result = []
     if combined_pixels:
         merged = np.vstack(combined_pixels)
-        k = min(colors_per_page, len(merged))
-        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(merged)
-        centers = kmeans.cluster_centers_
-        counts = np.bincount(labels)
+        centers, counts = _cluster_rgb_colors(merged, colors_per_page)
         total = counts.sum()
 
         for center, count in sorted(zip(centers, counts), key=lambda x: x[1], reverse=True):

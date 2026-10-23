@@ -293,6 +293,9 @@ class CustomerIssue(models.Model):
         related_name="+",
     )
     handled_at = models.DateTimeField(null=True, blank=True)
+    # The admin inbox uses this to show a red dot only for merchant messages
+    # that arrived after the conversation was last opened.
+    merchant_messages_read_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -313,13 +316,22 @@ class CustomerIssueMessage(models.Model):
 
     SENDER_CUSTOMER = "customer"
     SENDER_ADMIN = "admin"
+    SENDER_MERCHANT = "merchant"
     SENDER_CHOICES = [
         (SENDER_CUSTOMER, "Customer"),
         (SENDER_ADMIN, "EscroSafe"),
+        (SENDER_MERCHANT, "Merchant"),
+    ]
+    CHANNEL_CUSTOMER = "customer"
+    CHANNEL_MERCHANT = "merchant"
+    CHANNEL_CHOICES = [
+        (CHANNEL_CUSTOMER, "Customer conversation"),
+        (CHANNEL_MERCHANT, "Merchant conversation"),
     ]
 
     issue = models.ForeignKey(CustomerIssue, on_delete=models.CASCADE, related_name="messages")
     sender = models.CharField(max_length=20, choices=SENDER_CHOICES, db_index=True)
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES, default=CHANNEL_CUSTOMER, db_index=True)
     body = models.TextField()
     admin_user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -332,6 +344,26 @@ class CustomerIssueMessage(models.Model):
 
     class Meta:
         db_table = "admin_customer_issue_message"
+        ordering = ["created_at", "id"]
+
+
+def customer_issue_message_upload_path(instance, filename):
+    """Store reply files under random names so their URLs cannot be guessed."""
+    import os
+    import uuid
+
+    return f"customer_issue_messages/{uuid.uuid4().hex}{os.path.splitext(filename)[1].lower()}"
+
+
+class CustomerIssueMessageAttachment(models.Model):
+    message = models.ForeignKey(CustomerIssueMessage, on_delete=models.CASCADE, related_name="attachments")
+    file = models.FileField(upload_to=customer_issue_message_upload_path)
+    original_name = models.CharField(max_length=200, blank=True)
+    content_type = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "admin_customer_issue_message_attachment"
         ordering = ["created_at", "id"]
 
 

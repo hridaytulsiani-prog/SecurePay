@@ -21,7 +21,7 @@ from pdf_internal_segments_loader import (
 )
 
 try:
-    import fitz
+    import pymupdf as fitz
 except Exception:  # pragma: no cover
     fitz = None
 

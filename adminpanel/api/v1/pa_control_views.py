@@ -10,9 +10,13 @@ from payments.services.pa_control import (
     auto_refund_overdue_missing_pdf,
     dispatch_financial_command,
     ensure_default_capabilities,
+    finalize_due_aggregator_requests,
+    finalize_scheduled_aggregator_request,
     ingest_mock_event,
     register_protected_order,
+    revoke_scheduled_aggregator_request,
     run_reconciliation,
+    schedule_aggregator_request,
     send_aggregator_request,
     serialize_evidence_report,
     serialize_capability,
@@ -42,6 +46,7 @@ class PAProtectedOrderListCreateView(AdminAPIView):
 
     def get(self, request):
         ensure_default_capabilities()
+        finalize_due_aggregator_requests()
         if request.GET.get("sync") == "1":
             sync_recent_orders_to_pa(limit=50)
         q = (request.GET.get("q") or "").strip()
@@ -63,6 +68,7 @@ class PAProtectedOrderListCreateView(AdminAPIView):
             if (
                 item.decision_state in {PAProtectedOrder.DECISION_RELEASE, PAProtectedOrder.DECISION_REFUND}
                 and not (item.metadata or {}).get("aggregator_request")
+                and ((item.metadata or {}).get("decision_window") or {}).get("status") not in {"PENDING", "REVOKED"}
             ):
                 send_aggregator_request(item, item.decision_state, actor=getattr(request, "admin_user", None))
                 item.refresh_from_db()
@@ -113,11 +119,18 @@ class PAProtectedOrderActionView(AdminAPIView):
                 dispatch_financial_command(protected_order)
                 apply_provider_command_result(protected_order, "ACCEPTED")
             elif action == "send-request":
-                send_aggregator_request(
+                schedule_aggregator_request(
                     protected_order,
                     request.data.get("decision"),
                     actor=getattr(request, "admin_user", None),
                 )
+            elif action == "revoke-request":
+                revoke_scheduled_aggregator_request(
+                    protected_order,
+                    actor=getattr(request, "admin_user", None),
+                )
+            elif action == "finalize-request":
+                finalize_scheduled_aggregator_request(protected_order)
             elif action == "reconcile":
                 run_reconciliation(protected_order, force_mismatch=bool(request.data.get("force_mismatch", False)))
             else:
