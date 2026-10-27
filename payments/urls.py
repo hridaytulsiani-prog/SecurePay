@@ -19,6 +19,12 @@ from payments.api.v1.payment_lifecycle import PaymentWebhookView, SettlementRunV
 from payments.api.v1.refunds import RefundRequestView, RefundWebhookView
 from payments.api.v1.checkout_sessions import CheckoutSessionDetailView, CheckoutSessionView
 from payments.api.v1.button_config import ButtonConfigView
+from payments.api.v1.omniware import (
+    CheckoutSessionPaymentStatusView,
+    CheckoutSessionPaymentView,
+    MockOmniwarePaymentView,
+    OmniwarePaymentCallbackView,
+)
 
 urlpatterns = [
     path('create_payment/', CreatePayment.as_view(), name='create_payment'),
@@ -31,11 +37,15 @@ urlpatterns = [
     path('v1/orders/create/', CreateManualOrder.as_view(), name='manual-order-create'),
     path("v1/checkout-sessions/", CheckoutSessionView.as_view(), name="checkout-session-create"),
     path("v1/checkout-sessions/<str:session_id>/", CheckoutSessionDetailView.as_view(), name="checkout-session-detail"),
+    path("v1/checkout-sessions/<str:session_id>/payment/", CheckoutSessionPaymentView.as_view(), name="checkout-session-payment"),
+    path("v1/checkout-sessions/<str:session_id>/payment-status/", CheckoutSessionPaymentStatusView.as_view(), name="checkout-session-payment-status"),
     path("v1/button-config/", ButtonConfigView.as_view(), name="button-config"),
     path("phonepe/initiate/", PhonePeInitiateView.as_view(), name="phonepe-initiate"),
     path("phonepe/return/", PhonePeReturnView.as_view(), name="phonepe-return"),
     path("phonepe/callback/", PhonePeCallbackView.as_view(), name="phonepe-callback"),
     path("webhooks/<str:provider>/", PaymentWebhookView.as_view(), name="payment-webhook"),
+    path("webhooks/omniware/payment/", OmniwarePaymentCallbackView.as_view(), name="omniware-payment-callback"),
+    path("mock-omniware/pay/<str:provider_uuid>/", MockOmniwarePaymentView.as_view(), name="mock-omniware-payment"),
     path("v1/refunds/", RefundRequestView.as_view(), name="refund-request"),
     path("webhooks/<str:provider>/refunds/", RefundWebhookView.as_view(), name="refund-webhook"),
     path("v1/settlements/run/", SettlementRunView.as_view(), name="settlement-run"),

@@ -5,8 +5,12 @@ import requests
 from django.conf import settings
 
 
-class OmniwareRefundError(Exception):
+class OmniwareError(Exception):
     pass
+
+
+# Backwards-compatible name used by the refund service.
+OmniwareRefundError = OmniwareError
 
 
 def generate_hash(parameters, salt):
@@ -24,10 +28,10 @@ def generate_hash(parameters, salt):
 def verify_response_hash(payload, salt):
     response_hash = payload.get("hash")
     if response_hash is None:
-        return True
+        return False
     values = dict(payload)
     values.pop("hash", None)
-    return response_hash == generate_hash(values, salt)
+    return str(response_hash).upper() == generate_hash(values, salt)
 
 
 def _amount_for_provider(amount):
@@ -68,6 +72,21 @@ def _post_form(endpoint, payload):
         raise OmniwareRefundError("Omniware response hash verification failed")
 
     return form, response_payload
+
+
+def create_payment_request(payload):
+    """Create an Omniware hosted-payment URL using only server-side secrets."""
+    return _post_form(
+        getattr(settings, "OMNIWARE_PAYMENT_URL_ENDPOINT", "/v2/getpaymentrequesturl"),
+        payload,
+    )
+
+
+def get_payment_status(provider_order_id):
+    return _post_form(
+        getattr(settings, "OMNIWARE_PAYMENT_STATUS_ENDPOINT", "/v2/paymentstatus"),
+        {"order_id": provider_order_id},
+    )
 
 
 def create_refund(refund_request):

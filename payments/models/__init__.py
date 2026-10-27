@@ -14,6 +14,7 @@ from .payment_lifecycle import (
     SettlementRecord,
 )
 from .refund import RefundRequest
+from .provider import MerchantProviderProfile, PaymentAttempt
 from .audit import AuditLog
 from .decision_history import DecisionHistory
 from .pa_control import (

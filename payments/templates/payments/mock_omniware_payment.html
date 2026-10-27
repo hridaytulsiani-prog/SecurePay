@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mock Omniware Checkout</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#f2f6f4;color:#173d38;font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}.card{width:min(500px,100%);background:#fff;border:1px solid #dce7e2;border-radius:20px;box-shadow:0 22px 60px rgba(20,55,49,.12);overflow:hidden}.head{padding:22px 26px;background:#173d38;color:#fff}.head small{display:block;color:#bfe0d4;text-transform:uppercase;letter-spacing:.1em}.body{padding:26px}.demo{margin:0 0 20px;padding:11px 14px;border-radius:10px;background:#fff8e6;color:#714f00}.row{display:flex;justify-content:space-between;gap:20px;padding:10px 0;border-bottom:1px solid #edf2f0}.row span{color:#65736f}.amount{font-size:1.4rem;font-weight:750}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:24px}button{border:0;border-radius:10px;padding:12px 14px;font:inherit;font-weight:700;cursor:pointer}.success{background:#147d59;color:#fff}.pending{background:#e9f1ee;color:#173d38}.failed{background:#fde9e7;color:#9f2d25}.cancelled{background:#f0f1f1;color:#4f5d59}.foot{text-align:center;color:#7a8985;font-size:.82rem;margin:18px 0 0}@media(max-width:480px){.actions{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <header class="head"><small>Local test gateway</small><h1>Omniware simulator</h1></header>
+    <section class="body">
+      <p class="demo"><strong>Demo only.</strong> No money or real banking system is involved.</p>
+      <div class="row"><span>Merchant</span><strong>{{ attempt.order.merchant.merchant_name }}</strong></div>
+      <div class="row"><span>Order</span><strong>{{ attempt.order.merchant_order_id }}</strong></div>
+      <div class="row"><span>Provider reference</span><strong>{{ attempt.provider_order_id }}</strong></div>
+      <div class="row"><span>Amount</span><strong class="amount">{{ attempt.order.order_currency }} {{ attempt.order.order_amount }}</strong></div>
+      <form method="post" class="actions">
+        <button class="success" name="outcome" value="success">Simulate success</button>
+        <button class="pending" name="outcome" value="pending">Keep pending</button>
+        <button class="failed" name="outcome" value="failed">Simulate failure</button>
+        <button class="cancelled" name="outcome" value="cancelled">Cancel payment</button>
+      </form>
+      <p class="foot">The simulator signs the callback with SHA-512 and sends it through the same validation used for a provider callback.</p>
+    </section>
+  </main>
+</body>
+</html>
