@@ -78,6 +78,15 @@ from adminpanel.api.v1.needs_attention_views import (
     AdminNeedsAttentionPdfDecisionView,
     AdminNeedsAttentionView,
 )
+from adminpanel.api.v1.merchant_risk_views import (
+    AdminMerchantRiskAccessView,
+    AdminMerchantRiskDetailView,
+    AdminMerchantRiskListView,
+)
+from adminpanel.api.v1.customer_performance_views import (
+    AdminCustomerPerformanceDetailView,
+    AdminCustomerPerformanceListView,
+)
 
 urlpatterns = [
     # Session lifecycle
@@ -91,6 +100,11 @@ urlpatterns = [
     path("merchants/", AdminMerchantListView.as_view(), name="admin-merchants"),
     path("merchants/<int:merchant_id>/history/", AdminMerchantHistoryView.as_view(), name="admin-merchant-history"),
     path("merchants/<int:merchant_id>/", AdminMerchantDetailView.as_view(), name="admin-merchant-detail"),
+    path("merchant-risk/", AdminMerchantRiskListView.as_view(), name="admin-merchant-risk-list"),
+    path("merchant-risk/<int:merchant_id>/", AdminMerchantRiskDetailView.as_view(), name="admin-merchant-risk-detail"),
+    path("merchant-risk/<int:merchant_id>/access/", AdminMerchantRiskAccessView.as_view(), name="admin-merchant-risk-access"),
+    path("customer-performance/", AdminCustomerPerformanceListView.as_view(), name="admin-customer-performance-list"),
+    path("customer-performance/<int:customer_id>/", AdminCustomerPerformanceDetailView.as_view(), name="admin-customer-performance-detail"),
     path("orders/", AdminOrderListView.as_view(), name="admin-orders"),
     path("enquiries/", AdminEnquiryListView.as_view(), name="admin-enquiries"),
     path("suspicious-pdfs/", AdminSuspiciousPdfListView.as_view(), name="admin-suspicious-pdfs"),

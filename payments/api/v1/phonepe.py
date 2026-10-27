@@ -60,7 +60,7 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from payments.api.v1.phonepe_auth import get_phonepe_oauth_token
-from payments.auth import get_merchant_id_from_token
+from payments.auth import get_merchant_id_from_token, merchant_order_restriction
 from payments.models.orderinfo import OrderInfo
 from payments.models.customerinfo import CustomerInfo
 from payments.models.merchantinfo import MerchantInfo
@@ -241,6 +241,9 @@ class PhonePeInitiateView(APIView):
         merchant = MerchantInfo.objects.filter(id=merchant_id).first()
         if merchant is None:
             return Response({"ok": False, "error": "No merchant found for token"}, status=status.HTTP_400_BAD_REQUEST)
+        restriction = merchant_order_restriction(merchant)
+        if restriction:
+            return Response({"ok": False, **restriction}, status=status.HTTP_403_FORBIDDEN)
 
         # Customer resolution: CustomerInfo.customer_phone is unique, so a
         # returning customer (same mobile number) reuses their existing row

@@ -13,6 +13,7 @@ from .v1.issues import MerchantIssueDetail, MerchantIssueMessages, MerchantIssue
 from .v1.create_merchant import (
     CreateMerchant,
     LoginMerchant,
+    MerchantSessionStatus,
     MerchantCheckoutFieldMapping,
     MerchantCourierPreferences,
     SendMerchantRegistrationOtp,
@@ -28,6 +29,7 @@ urlpatterns = [
     path('register/send-otp/', SendMerchantRegistrationOtp.as_view(), name='merchant_register_send_otp'),
     path('register/verify-otp/', VerifyMerchantRegistrationOtp.as_view(), name='merchant_register_verify_otp'),
     path('login/', LoginMerchant.as_view(), name='login_merchant'),
+    path('session-status/', MerchantSessionStatus.as_view(), name='merchant_session_status'),
     path('courier-preferences/', MerchantCourierPreferences.as_view(), name='merchant_courier_preferences'),
     path('issues/', MerchantIssues.as_view(), name='merchant_issues'),
     path('issues/<int:issue_id>/', MerchantIssueDetail.as_view(), name='merchant_issue_detail'),

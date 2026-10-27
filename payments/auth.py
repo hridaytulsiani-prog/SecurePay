@@ -29,13 +29,74 @@
 # same idea, not sharing code.
 import secrets
 from hashlib import sha512
+from zoneinfo import ZoneInfo
 
 from django.core.cache import cache
+from django.utils import timezone
 
 from payments.models.merchantinfo import MerchantInfo
 
 
 TOKEN_TTL_SECONDS = 10 * 60  # 10 minutes; keep in sync with the merchant client's idle timeout.
+
+
+def merchant_access_is_blocked(merchant):
+    """Central access gate used for sessions and signed per-order tokens."""
+    from adminpanel.models import MerchantRiskProfile
+
+    try:
+        profile = MerchantRiskProfile.objects.get(merchant=merchant)
+    except MerchantRiskProfile.DoesNotExist:
+        return False
+    return profile.currently_blocked()
+
+
+def merchant_access_block(merchant):
+    """Return the active risk restriction, or None after any expiry cleanup."""
+    from adminpanel.models import MerchantRiskProfile
+
+    try:
+        profile = MerchantRiskProfile.objects.get(merchant=merchant)
+    except MerchantRiskProfile.DoesNotExist:
+        return None
+    return profile if profile.currently_blocked() else None
+
+
+def merchant_order_restriction(merchant):
+    """Return the active new-order restriction shown to merchant clients."""
+    profile = merchant_access_block(merchant)
+    if profile is None:
+        return None
+
+    if profile.access_status == profile.ACCESS_TEMPORARY:
+        until = timezone.localtime(profile.blocked_until, ZoneInfo("Asia/Kolkata"))
+        return {
+            "code": "MERCHANT_TEMPORARILY_BLOCKED",
+            "block_type": "temporary",
+            "blocked_until": profile.blocked_until.isoformat(),
+            "error": (
+                f"New orders are temporarily paused until {until.strftime('%d %b %Y, %I:%M %p')} IST. "
+                "You can continue to manage your account and existing orders."
+            ),
+        }
+
+    return {
+        "code": "MERCHANT_PERMANENTLY_BLOCKED",
+        "block_type": "permanent",
+        "blocked_until": None,
+        "error": (
+            "New orders are permanently paused for this account. "
+            "You can continue to manage your account and existing orders. Please contact EscroSafe Support."
+        ),
+    }
+
+
+def merchant_order_restriction_for_id(merchant_id):
+    try:
+        merchant = MerchantInfo.objects.get(id=merchant_id)
+    except MerchantInfo.DoesNotExist:
+        return None
+    return merchant_order_restriction(merchant)
 
 
 def _normalize_session_token(merchant_id, auth_token):
@@ -92,6 +153,41 @@ def _verify_session_token_and_refresh(merchant_id, auth_token):
         return False
 
 
+def get_merchant_from_session_token(auth_token, *, allow_blocked=True):
+    """Resolve a live session token.
+
+    Risk restrictions no longer revoke dashboard access. New-order endpoints
+    enforce them explicitly while existing-order and account views stay usable.
+    """
+    if not auth_token:
+        return None
+
+    merchant_id, raw_token = _normalize_session_token(None, auth_token)
+    if not merchant_id or not raw_token:
+        return None
+    if not _verify_session_token_and_refresh(merchant_id, raw_token):
+        return None
+
+    try:
+        merchant = MerchantInfo.objects.get(id=merchant_id)
+    except MerchantInfo.DoesNotExist:
+        return None
+    if not allow_blocked and merchant_access_is_blocked(merchant):
+        return None
+    return merchant
+
+
+def revoke_merchant_session(auth_token):
+    """Delete one merchant session after a browser observes a restriction."""
+    merchant_id, raw_token = _normalize_session_token(None, auth_token)
+    if not merchant_id or not raw_token:
+        return
+    try:
+        cache.delete(f"merchant_{merchant_id}:{raw_token}")
+    except Exception:
+        pass
+
+
 def get_merchant_id_from_token(auth_token):
     """The main entry point almost every merchant-authenticated view calls.
     Returns the merchant's id if `auth_token` is a currently-valid Redis
@@ -101,14 +197,8 @@ def get_merchant_id_from_token(auth_token):
     if not auth_token:
         return None
 
-    normalized_merchant_id, normalized_token = _normalize_session_token(None, auth_token)
-    if not normalized_merchant_id or not normalized_token:
-        return None
-
-    if _verify_session_token_and_refresh(normalized_merchant_id, normalized_token):
-        return normalized_merchant_id
-
-    return None
+    merchant = get_merchant_from_session_token(auth_token)
+    return merchant.id if merchant is not None else None
 
 
 def verify_merchant_auth_token(merchant_id, auth_token, merchant_order_id=None):

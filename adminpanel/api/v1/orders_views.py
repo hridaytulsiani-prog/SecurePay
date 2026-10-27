@@ -9,14 +9,18 @@ across merchants.
 
 from django.conf import settings
 from django.db.models import Q
+from django.utils import timezone
 from django.utils.dateparse import parse_date
+from math import ceil
 import re
 
 from rest_framework.views import Response
 from rest_framework import status
 
 from adminpanel.permissions import AdminAPIView
-from adminpanel.models import CustomerIssue, MerchantIssue
+from adminpanel.models import CustomerIssue, MerchantIssue, MerchantRiskProfile
+from adminpanel.merchant_risk import FLAG_THRESHOLD, is_flagged
+from adminpanel.customer_performance import CUSTOMER_FLAG_THRESHOLD, customer_is_flagged, refresh_all_customer_scores
 from payments.models.merchantinfo import MerchantInfo
 from payments.models.orderinfo import OrderInfo
 from payments.models.enquirydata import EnquiryData, EnquiryNote
@@ -426,6 +430,7 @@ class AdminOrderListView(AdminAPIView):
             "merchant__merchant_name",
             "merchant__merchant_email",
             "customer_info__customer_name",
+            "customer_info_id",
             "customer_info__customer_email",
             "customer_info__customer_phone",
             "customer_info__customer_address",
@@ -441,6 +446,29 @@ class AdminOrderListView(AdminAPIView):
             row["display_payment_id"] = numeric_payment_id(
                 f"order:{row.get('merchant_order_id')}:{row.get('id')}"
             )
+
+        merchant_risk = {
+            profile.merchant_id: profile
+            for profile in MerchantRiskProfile.objects.filter(
+                merchant_id__in={row["merchant_id"] for row in rows if row.get("merchant_id")}
+            )
+        }
+        for row in rows:
+            profile = merchant_risk.get(row.get("merchant_id"))
+            row["merchant_is_flagged"] = bool(profile and is_flagged(profile))
+            row["merchant_success_rate"] = (
+                float(profile.success_rate) if profile and profile.scored_orders > 0 else None
+            )
+            row["merchant_review_threshold"] = float(FLAG_THRESHOLD)
+
+        customer_risk = {profile.customer_id: profile for profile in refresh_all_customer_scores()}
+        for row in rows:
+            profile = customer_risk.get(row.get("customer_info_id"))
+            row["customer_is_flagged"] = bool(profile and customer_is_flagged(profile))
+            row["customer_success_rate"] = (
+                float(profile.success_rate) if profile and profile.assessed_orders > 0 else None
+            )
+            row["customer_review_threshold"] = float(CUSTOMER_FLAG_THRESHOLD)
 
         # Free-text search is done in Python rather than the DB because it
         # spans multiple unrelated columns (order id, customer, merchant) —
@@ -515,6 +543,26 @@ class AdminMerchantListView(AdminAPIView):
         for merchant in merchants:
             email = merchant.get("merchant_email") or ""
             merchant["username"] = email.split("@", 1)[0] if email else f"merchant-{merchant['id']}"
+        profiles = {
+            profile.merchant_id: profile
+            for profile in MerchantRiskProfile.objects.filter(
+                merchant_id__in=[merchant["id"] for merchant in merchants]
+            ).select_related("blocked_by")
+        }
+        for merchant in merchants:
+            profile = profiles.get(merchant["id"])
+            blocked = profile.currently_blocked() if profile else False
+            merchant["is_blocked"] = blocked
+            merchant["access_status"] = profile.access_status if profile else MerchantRiskProfile.ACCESS_ACTIVE
+            merchant["block_reason"] = profile.block_reason if blocked else ""
+            merchant["blocked_until"] = profile.blocked_until.isoformat() if blocked and profile.blocked_until else None
+            if not blocked:
+                merchant["restriction_period"] = "—"
+            elif profile.access_status == MerchantRiskProfile.ACCESS_PERMANENT:
+                merchant["restriction_period"] = "Permanent"
+            else:
+                remaining = max(1, ceil((profile.blocked_until - timezone.now()).total_seconds() / 86400))
+                merchant["restriction_period"] = f"{remaining} day{'s' if remaining != 1 else ''} remaining"
         if q:
             merchants = [
                 merchant

@@ -20,7 +20,7 @@ from django.core.mail import send_mail
 from django.db.models import OuterRef, Subquery
 from rest_framework.views import APIView, Response, status
 
-from payments.auth import get_merchant_id_from_token
+from payments.auth import get_merchant_id_from_token, merchant_order_restriction_for_id
 from payments.models.orderinfo import OrderInfo
 from payments.models.customerinfo import CustomerInfo
 from payments.models.payment_lifecycle import PaymentNotification
@@ -66,6 +66,10 @@ class GenerateOrder(APIView):
         token_merchant_id = get_merchant_id_from_token(self.auth_token)
         if token_merchant_id is None:
             return Response({"error": "Invalid or expired merchant token"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        restriction = merchant_order_restriction_for_id(token_merchant_id)
+        if restriction:
+            return Response(restriction, status=status.HTTP_403_FORBIDDEN)
 
         self.merchant_id = token_merchant_id
         self.merchant_order_id = request.data.get('merchant_order_id')
@@ -172,6 +176,9 @@ class CreatePayment(View):
         token_merchant_id = get_merchant_id_from_token(self.auth_token)
         if token_merchant_id is None:
             return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
+        restriction = merchant_order_restriction_for_id(token_merchant_id)
+        if restriction:
+            return JsonResponse(restriction, status=403)
         self.merchant_id = token_merchant_id
 
         # Validate & compute amount in paise
@@ -337,6 +344,9 @@ class CreateManualOrder(View):
         merchant_id = get_merchant_id_from_token(auth_token)
         if merchant_id is None:
             return JsonResponse({"error": "Invalid or expired merchant token"}, status=401)
+        restriction = merchant_order_restriction_for_id(merchant_id)
+        if restriction:
+            return JsonResponse(restriction, status=403)
 
         merchant_order_id = str(payload.get("merchantOrderId") or "").strip()
         customer_name = str(payload.get("customerName") or "").strip()

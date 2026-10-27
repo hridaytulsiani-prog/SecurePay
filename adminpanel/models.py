@@ -405,3 +405,96 @@ class CustomerIssueAttachment(models.Model):
     class Meta:
         db_table = "admin_customer_issue_attachment"
         ordering = ["created_at", "id"]
+
+
+class MerchantRiskProfile(models.Model):
+    """Persisted delivery score and admin-enforced access state for a merchant."""
+
+    ACCESS_ACTIVE = "active"
+    ACCESS_TEMPORARY = "temporary_block"
+    ACCESS_PERMANENT = "permanent_block"
+    ACCESS_CHOICES = [
+        (ACCESS_ACTIVE, "Active"),
+        (ACCESS_TEMPORARY, "Temporarily blocked"),
+        (ACCESS_PERMANENT, "Permanently blocked"),
+    ]
+
+    merchant = models.OneToOneField(
+        "payments.MerchantInfo",
+        on_delete=models.CASCADE,
+        related_name="risk_profile",
+    )
+    success_rate = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    total_orders = models.PositiveIntegerField(default=0)
+    scored_orders = models.PositiveIntegerField(default=0)
+    delivered_orders = models.PositiveIntegerField(default=0)
+    successful_orders = models.PositiveIntegerField(default=0)
+    unsuccessful_orders = models.PositiveIntegerField(default=0)
+    pending_orders = models.PositiveIntegerField(default=0)
+    excluded_orders = models.PositiveIntegerField(default=0)
+    delivered_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    settled_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    score_updated_at = models.DateTimeField(null=True, blank=True)
+    access_status = models.CharField(max_length=24, choices=ACCESS_CHOICES, default=ACCESS_ACTIVE, db_index=True)
+    blocked_until = models.DateTimeField(null=True, blank=True)
+    block_reason = models.TextField(blank=True)
+    blocked_at = models.DateTimeField(null=True, blank=True)
+    blocked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "admin_merchant_risk_profile"
+        ordering = ["success_rate", "merchant_id"]
+
+    def currently_blocked(self, *, now=None):
+        """Return whether access is blocked, reopening expired temporary blocks."""
+        from django.utils import timezone
+
+        if self.access_status == self.ACCESS_PERMANENT:
+            return True
+        if self.access_status != self.ACCESS_TEMPORARY:
+            return False
+        now = now or timezone.now()
+        if self.blocked_until and self.blocked_until > now:
+            return True
+        self.access_status = self.ACCESS_ACTIVE
+        self.blocked_until = None
+        self.block_reason = ""
+        self.blocked_at = None
+        self.blocked_by = None
+        self.save(update_fields=[
+            "access_status", "blocked_until", "block_reason", "blocked_at", "blocked_by", "updated_at",
+        ])
+        return False
+
+
+class CustomerRiskProfile(models.Model):
+    """Persisted repeat-customer order quality score used for admin review."""
+
+    customer = models.OneToOneField(
+        "payments.CustomerInfo",
+        on_delete=models.CASCADE,
+        related_name="risk_profile",
+    )
+    success_rate = models.DecimalField(max_digits=5, decimal_places=2, default=100)
+    total_orders = models.PositiveIntegerField(default=0)
+    assessed_orders = models.PositiveIntegerField(default=0)
+    clean_orders = models.PositiveIntegerField(default=0)
+    problem_orders = models.PositiveIntegerField(default=0)
+    issue_count = models.PositiveIntegerField(default=0)
+    pending_orders = models.PositiveIntegerField(default=0)
+    score_updated_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "admin_customer_risk_profile"
+        ordering = ["success_rate", "-problem_orders", "customer_id"]
+
+    def __str__(self):
+        return f"Customer {self.customer_id}: {self.success_rate}%"

@@ -11,7 +11,7 @@ from django.utils.decorators import method_decorator
 
 from payments.models import CheckoutSession, CustomerInfo, MerchantInfo, OrderInfo
 from payments.api.v1.generate_order import _get_auth_token_from_request
-from payments.auth import get_merchant_id_from_token
+from payments.auth import get_merchant_id_from_token, merchant_order_restriction
 
 
 CHECKOUT_SESSION_TTL_SECONDS = 10 * 60
@@ -143,6 +143,9 @@ class CheckoutSessionView(View):
         merchant = MerchantInfo.objects.filter(merchant_key=merchant_key).first()
         if not merchant:
             return JsonResponse({"ok": False, "error": "invalid merchant_key"}, status=401)
+        restriction = merchant_order_restriction(merchant)
+        if restriction:
+            return JsonResponse({"ok": False, **restriction}, status=403)
 
         customer_snapshot = _safe_dict(payload.get("customer"))
         order_snapshot = _safe_dict(payload.get("order"))

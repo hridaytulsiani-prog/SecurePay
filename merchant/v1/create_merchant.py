@@ -37,7 +37,12 @@ from rest_framework.response import Response
 from rest_framework import status
 from payments.models.merchantinfo import MerchantInfo
 from payments.models.merchant_email_verification import MerchantEmailVerification
-from payments.auth import TOKEN_TTL_SECONDS, get_merchant_id_from_token
+from payments.auth import (
+    TOKEN_TTL_SECONDS,
+    get_merchant_from_session_token,
+    get_merchant_id_from_token,
+    merchant_order_restriction,
+)
 
 
 SUPPORTED_COURIERS = {
@@ -49,6 +54,10 @@ SUPPORTED_COURIERS = {
     "shiprocket": "Shiprocket",
     "xpressbees": "Xpressbees",
 }
+
+
+def _merchant_block_payload(merchant):
+    return merchant_order_restriction(merchant)
 
 BLUE_DART_PLANS = {
     "basic": {"label": "Basic", "otp_enabled": False},
@@ -403,6 +412,8 @@ class LoginMerchant(APIView):
         if merchant.password != hashed_password:
             return Response({"error": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
 
+        block_payload = _merchant_block_payload(merchant)
+
         # Session creation: same Redis key shape
         # ("merchant_{id}:{token}" -> merchant id, TTL = TOKEN_TTL_SECONDS)
         # that payments.auth._verify_session_token_and_refresh reads back.
@@ -419,7 +430,8 @@ class LoginMerchant(APIView):
                 "merchant_id": merchant.id,
                 "merchant_key": merchant.merchant_key,
                 "token": combined_token,
-                "expires_in": TOKEN_TTL_SECONDS
+                "expires_in": TOKEN_TTL_SECONDS,
+                "restriction": block_payload,
             },
             status=status.HTTP_200_OK
         )
@@ -431,6 +443,25 @@ class LoginMerchant(APIView):
             path="/",
         )
         return response
+
+
+class MerchantSessionStatus(APIView):
+    """Let open merchant clients detect an admin restriction promptly."""
+
+    def get(self, request):
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.removeprefix("Bearer ").strip()
+        merchant = get_merchant_from_session_token(token, allow_blocked=True)
+        if merchant is None:
+            return Response(
+                {"code": "SESSION_EXPIRED", "error": "Your session has expired. Please sign in again."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        block_payload = _merchant_block_payload(merchant)
+        if block_payload:
+            return Response({"status": "restricted", **block_payload}, status=status.HTTP_200_OK)
+        return Response({"status": "active"}, status=status.HTTP_200_OK)
 
 
 class MerchantCourierPreferences(APIView):
