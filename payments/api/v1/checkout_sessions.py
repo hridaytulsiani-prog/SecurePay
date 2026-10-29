@@ -15,6 +15,10 @@ from payments.auth import get_merchant_id_from_token, merchant_order_restriction
 
 
 CHECKOUT_SESSION_TTL_SECONDS = 10 * 60
+TEST_MODE_KEY = "_escrosafe_test_mode"
+TEST_STATUS_KEY = "_escrosafe_test_status"
+TEST_TRANSACTION_KEY = "_escrosafe_test_transaction_id"
+TEST_UPDATED_AT_KEY = "_escrosafe_test_updated_at"
 
 
 def _client_ip(request):
@@ -32,6 +36,29 @@ def _checkout_url(session_id, base_url=None):
 
 def _safe_dict(value):
     return value if isinstance(value, dict) else {}
+
+
+def _is_test_session(session):
+    return bool(session and _safe_dict(session.order_snapshot).get(TEST_MODE_KEY))
+
+
+def _test_session_status(session):
+    return str(_safe_dict(session.order_snapshot).get(TEST_STATUS_KEY) or "NOT_STARTED").upper()
+
+
+def _validate_test_order(customer_snapshot, order_snapshot):
+    """Validate the public SDK mapping without creating any financial records."""
+    order_id = str(order_snapshot.get("order_id") or "").strip()
+    amount_text = str(order_snapshot.get("amount") or "").strip()
+    customer_phone = str(customer_snapshot.get("phone") or "").strip()
+    if not order_id or not amount_text or not customer_phone:
+        raise ValueError("order id, amount, and customer phone are required")
+    try:
+        amount = Decimal(amount_text)
+    except (InvalidOperation, ValueError):
+        raise ValueError("amount must be a valid number")
+    if amount <= 0:
+        raise ValueError("amount must be greater than zero")
 
 
 def _is_pending_session_valid(session):
@@ -119,6 +146,8 @@ class CheckoutSessionView(View):
                 {
                     "session_id": session.session_id,
                     "status": session.status,
+                    "test_mode": _is_test_session(session),
+                    "test_status": _test_session_status(session) if _is_test_session(session) else None,
                     "customer_snapshot": session.customer_snapshot,
                     "order_snapshot": session.order_snapshot,
                     "page_snapshot": session.page_snapshot,
@@ -143,35 +172,46 @@ class CheckoutSessionView(View):
         merchant = MerchantInfo.objects.filter(merchant_key=merchant_key).first()
         if not merchant:
             return JsonResponse({"ok": False, "error": "invalid merchant_key"}, status=401)
-        restriction = merchant_order_restriction(merchant)
-        if restriction:
-            return JsonResponse({"ok": False, **restriction}, status=403)
+
+        test_mode = payload.get("test_mode") is True or str(payload.get("test_mode") or "").lower() == "true"
+        if not test_mode:
+            restriction = merchant_order_restriction(merchant)
+            if restriction:
+                return JsonResponse({"ok": False, **restriction}, status=403)
 
         customer_snapshot = _safe_dict(payload.get("customer"))
-        order_snapshot = _safe_dict(payload.get("order"))
+        order_snapshot = dict(_safe_dict(payload.get("order")))
         page_snapshot = _safe_dict(payload.get("page"))
         source_origin = str(payload.get("source_origin") or payload.get("sourceOrigin") or "")[:255]
         source_url = str(payload.get("source_url") or payload.get("sourceUrl") or "")
         order_id = str(order_snapshot.get("order_id") or "").strip()
 
         try:
-            with transaction.atomic():
-                _ensure_merchant_order(merchant, customer_snapshot, order_snapshot)
+            if test_mode:
+                _validate_test_order(customer_snapshot, order_snapshot)
+                order_snapshot[TEST_MODE_KEY] = True
+                order_snapshot[TEST_STATUS_KEY] = "NOT_STARTED"
+            else:
+                with transaction.atomic():
+                    _ensure_merchant_order(merchant, customer_snapshot, order_snapshot)
         except ValueError as error:
             return JsonResponse({"ok": False, "error": str(error)}, status=400)
 
         existing_session = None
         if order_id:
-            existing_session = (
-                CheckoutSession.objects
-                .filter(
-                    merchant=merchant,
-                    status=CheckoutSession.STATUS_CREATED,
-                    source_url=source_url,
-                    order_snapshot__order_id=order_id,
-                )
-                .order_by("-created_at")
-                .first()
+            candidates = CheckoutSession.objects.filter(
+                merchant=merchant,
+                status=CheckoutSession.STATUS_CREATED,
+                source_url=source_url,
+                order_snapshot__order_id=order_id,
+            )
+            existing_session = next(
+                (
+                    candidate
+                    for candidate in candidates.order_by("-created_at")[:10]
+                    if _is_test_session(candidate) == test_mode
+                ),
+                None,
             )
 
         if _is_pending_session_valid(existing_session):
@@ -213,6 +253,7 @@ class CheckoutSessionView(View):
                 "session_id": session.session_id,
                 "checkout_url": _checkout_url(session.session_id, str(payload.get("checkout_base_url") or "").strip() or None),
                 "reused": session == existing_session,
+                "test_mode": test_mode,
             },
             status=201,
         )
@@ -234,6 +275,8 @@ class CheckoutSessionDetailView(View):
             "ok": True,
             "session_id": session.session_id,
             "status": session.status,
+            "test_mode": _is_test_session(session),
+            "test_status": _test_session_status(session) if _is_test_session(session) else None,
             "merchant": {
                 "name": session.merchant.merchant_name,
                 "email": session.merchant.merchant_email,
@@ -276,4 +319,52 @@ class CheckoutSessionDetailView(View):
             "status": session.status,
             "source_url": session.source_url,
             "payment_url": payment_url,
+        })
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class CheckoutSessionTestOutcomeView(View):
+    """Record a simulated result for an explicit SDK test session only."""
+
+    OUTCOMES = {
+        "success": "SUCCESS",
+        "failed": "FAILED",
+        "cancelled": "CANCELLED",
+    }
+
+    def post(self, request, session_id, *args, **kwargs):
+        try:
+            payload = json.loads(request.body.decode("utf-8")) if request.body else {}
+        except (UnicodeDecodeError, ValueError):
+            return HttpResponseBadRequest("invalid json")
+
+        session = CheckoutSession.objects.filter(session_id=session_id).first()
+        if not session:
+            return JsonResponse({"ok": False, "error": "checkout session not found"}, status=404)
+        if not _is_test_session(session):
+            return JsonResponse({"ok": False, "error": "this is not a test session"}, status=409)
+        if session.status == CheckoutSession.STATUS_CREATED and not _is_pending_session_valid(session):
+            _expire_stale_session(session)
+            return JsonResponse({"ok": False, "error": "checkout session expired"}, status=410)
+
+        outcome = str(payload.get("outcome") or "").strip().lower()
+        status = self.OUTCOMES.get(outcome)
+        if not status:
+            return JsonResponse({"ok": False, "error": "outcome must be success, failed, or cancelled"}, status=400)
+
+        snapshot = dict(_safe_dict(session.order_snapshot))
+        snapshot[TEST_STATUS_KEY] = status
+        snapshot[TEST_TRANSACTION_KEY] = f"TEST-{timezone.now().strftime('%Y%m%d%H%M%S%f')}"
+        snapshot[TEST_UPDATED_AT_KEY] = timezone.now().isoformat()
+        session.order_snapshot = snapshot
+        session.status = CheckoutSession.STATUS_PAYMENT_STARTED
+        session.save(update_fields=["order_snapshot", "status", "updated_at"])
+        return JsonResponse({
+            "ok": True,
+            "test_mode": True,
+            "status": status,
+            "session_id": session.session_id,
+            "order_id": str(snapshot.get("order_id") or ""),
+            "transaction_id": snapshot[TEST_TRANSACTION_KEY],
+            "return_url": session.source_url,
         })

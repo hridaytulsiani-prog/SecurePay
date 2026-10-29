@@ -14,7 +14,12 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
 from payments.adapters.omniware import OmniwareError, create_payment_request, generate_hash, verify_response_hash
-from payments.api.v1.checkout_sessions import _is_pending_session_valid
+from payments.api.v1.checkout_sessions import (
+    TEST_TRANSACTION_KEY,
+    _is_pending_session_valid,
+    _is_test_session,
+    _test_session_status,
+)
 from payments.models import (
     CheckoutSession,
     OrderInfo,
@@ -209,6 +214,16 @@ class CheckoutSessionPaymentView(View):
                 return JsonResponse({"ok": False, "error": "checkout session expired"}, status=410)
             session.status = CheckoutSession.STATUS_CONFIRMED
             session.save(update_fields=["status", "updated_at"])
+        if _is_test_session(session):
+            session.status = CheckoutSession.STATUS_PAYMENT_STARTED
+            session.save(update_fields=["status", "updated_at"])
+            return JsonResponse({
+                "ok": True,
+                "test_mode": True,
+                "mock": True,
+                "payment_mode": "TEST",
+                "status": _test_session_status(session),
+            })
         order = _find_order(session)
         if not order:
             return JsonResponse({"ok": False, "error": "order not found"}, status=404)
@@ -268,6 +283,18 @@ class CheckoutSessionPaymentStatusView(View):
         session = CheckoutSession.objects.filter(session_id=session_id).first()
         if not session:
             return JsonResponse({"ok": False, "error": "checkout session not found"}, status=404)
+        if _is_test_session(session):
+            snapshot = session.order_snapshot if isinstance(session.order_snapshot, dict) else {}
+            return JsonResponse({
+                "ok": True,
+                "test_mode": True,
+                "status": _test_session_status(session),
+                "message": "Simulated test payment result.",
+                "order_id": str(snapshot.get("order_id") or ""),
+                "transaction_id": str(snapshot.get(TEST_TRANSACTION_KEY) or ""),
+                "return_url": session.source_url,
+                "updated_at": session.updated_at.isoformat(),
+            })
         attempt = session.payment_attempts.first()
         if not attempt:
             return JsonResponse({"ok": True, "status": "NOT_STARTED"})

@@ -517,17 +517,21 @@ def pa_control_for(order):
     """Small live PA snapshot used by the order-report decision controls."""
     from payments.models.pa_control import PAProtectedOrder
     from payments.services.pa_control import ensure_protected_order_for_order, finalize_scheduled_aggregator_request
+    from adminpanel.api.v1.owner_review_views import requires_owner_review, review_queryset, serialize_owner_review
 
     protected = PAProtectedOrder.objects.filter(order=order).first()
     if protected is None:
         protected = ensure_protected_order_for_order(order)
     protected = finalize_scheduled_aggregator_request(protected)
     command = getattr(protected, "financial_command", None)
+    owner_review = review_queryset().filter(protected_order=protected).first()
     return {
         "vaultpay_order_id": protected.vaultpay_order_id,
         "decision_state": protected.decision_state,
         "aggregator_request": (protected.metadata or {}).get("aggregator_request"),
         "decision_window": (protected.metadata or {}).get("decision_window"),
+        "owner_review_required": requires_owner_review(protected),
+        "owner_review": serialize_owner_review(owner_review) if owner_review else None,
         "command": None
         if command is None
         else {

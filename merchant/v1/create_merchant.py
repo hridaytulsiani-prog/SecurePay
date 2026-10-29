@@ -484,6 +484,7 @@ class MerchantCourierPreferences(APIView):
             return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
 
         return Response({
+            "merchant_key": merchant.merchant_key,
             "courier_setup_completed": merchant.courier_setup_completed,
             "courier_preferences": merchant.courier_preferences or {},
         })
@@ -515,11 +516,17 @@ class MerchantCourierPreferences(APIView):
             "couriers": courier_keys,
             "blue_dart_plan": blue_dart_plan,
         }
-        merchant.courier_setup_completed = True
-        merchant.save(update_fields=["courier_preferences", "courier_setup_completed"])
+        complete_setup_value = request.data.get("complete_setup", True)
+        complete_setup = complete_setup_value not in (False, 0, "0", "false", "False")
+        update_fields = ["courier_preferences"]
+        if complete_setup:
+            merchant.courier_setup_completed = True
+            update_fields.append("courier_setup_completed")
+        merchant.save(update_fields=update_fields)
         return Response({
             "message": "Courier preferences saved.",
-            "courier_setup_completed": True,
+            "merchant_key": merchant.merchant_key,
+            "courier_setup_completed": merchant.courier_setup_completed,
             "courier_preferences": merchant.courier_preferences,
         })
 

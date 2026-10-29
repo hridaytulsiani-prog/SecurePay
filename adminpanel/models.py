@@ -498,3 +498,77 @@ class CustomerRiskProfile(models.Model):
 
     def __str__(self):
         return f"Customer {self.customer_id}: {self.success_rate}%"
+
+
+class HighValueDecisionReview(models.Model):
+    """Owner approval required before a high-value refund/release is staged."""
+
+    STATUS_PENDING = "PENDING"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending owner review"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+    DECISION_RELEASE = "RELEASE"
+    DECISION_REFUND = "REFUND"
+    DECISION_CHOICES = [
+        (DECISION_RELEASE, "Release"),
+        (DECISION_REFUND, "Refund"),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    protected_order = models.ForeignKey(
+        "payments.PAProtectedOrder",
+        on_delete=models.CASCADE,
+        related_name="owner_decision_reviews",
+    )
+    issue = models.ForeignKey(
+        "MerchantIssue",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="owner_decision_reviews",
+    )
+    decision = models.CharField(max_length=16, choices=DECISION_CHOICES)
+    amount_minor = models.PositiveIntegerField()
+    currency = models.CharField(max_length=10, default="INR")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING, db_index=True)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="high_value_reviews_requested",
+    )
+    assigned_owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="high_value_reviews_assigned",
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="high_value_reviews_completed",
+    )
+    reviewer_note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "admin_high_value_decision_review"
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=("assigned_owner", "status", "created_at"), name="admin_hv_owner_status_idx"),
+            models.Index(fields=("protected_order", "status"), name="admin_hv_order_status_idx"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("protected_order",),
+                condition=models.Q(status="PENDING"),
+                name="admin_hv_one_pending_review",
+            )
+        ]

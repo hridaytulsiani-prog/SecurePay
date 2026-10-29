@@ -87,6 +87,11 @@ from adminpanel.api.v1.customer_performance_views import (
     AdminCustomerPerformanceDetailView,
     AdminCustomerPerformanceListView,
 )
+from adminpanel.api.v1.owner_review_views import (
+    OwnerDecisionReviewActionView,
+    OwnerDecisionReviewListCreateView,
+    OwnerReviewerListView,
+)
 
 urlpatterns = [
     # Session lifecycle
@@ -190,4 +195,7 @@ urlpatterns = [
     path("stats/", AdminStatsView.as_view(), name="admin-stats"),
     path("audit-logs/", AdminAuditLogListView.as_view(), name="admin-audit-logs"),
     path("decision-history/", AdminDecisionHistoryListView.as_view(), name="admin-decision-history"),
+    path("owner-reviews/owners/", OwnerReviewerListView.as_view(), name="admin-owner-reviewers"),
+    path("owner-reviews/", OwnerDecisionReviewListCreateView.as_view(), name="admin-owner-reviews"),
+    path("owner-reviews/<int:review_id>/decision/", OwnerDecisionReviewActionView.as_view(), name="admin-owner-review-decision"),
 ]

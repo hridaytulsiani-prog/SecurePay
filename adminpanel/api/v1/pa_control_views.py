@@ -3,6 +3,9 @@ from rest_framework import status
 from rest_framework.views import APIView, Response
 
 from adminpanel.permissions import AdminAPIView
+from adminpanel.permissions import ROLE_OWNER
+from adminpanel.api.v1.owner_review_views import requires_owner_review, review_queryset, serialize_owner_review
+from adminpanel.models import HighValueDecisionReview
 from adminpanel.api.v1.payment_ids import payment_id_for_protected_order
 from payments.models import MerchantInfo, PAFinancialCommand, PAProviderCapability, PAProtectedOrder
 from payments.services.pa_control import (
@@ -29,6 +32,9 @@ from payments.services.pa_control import (
 def _serialize_admin_order(protected_order):
     row = serialize_order(protected_order)
     row["display_payment_id"] = payment_id_for_protected_order(protected_order)
+    latest_review = review_queryset().filter(protected_order=protected_order).first()
+    row["owner_review_required"] = requires_owner_review(protected_order)
+    row["owner_review"] = serialize_owner_review(latest_review) if latest_review else None
     return row
 
 
@@ -92,6 +98,14 @@ class PAProtectedOrderListCreateView(AdminAPIView):
 class PAProtectedOrderActionView(AdminAPIView):
     required_permission = "pa_control.manage"
 
+    def initial(self, request, *args, **kwargs):
+        # The manager who requested an owner-reviewed decision must be able
+        # to revoke it during its 10-minute window. Finalization is also
+        # callable by the order report when that approved window expires.
+        if kwargs.get("action") in {"revoke-request", "finalize-request"}:
+            self.required_permission = "orders.view"
+        super().initial(request, *args, **kwargs)
+
     def post(self, request, vaultpay_order_id, action):
         protected_order = PAProtectedOrder.objects.filter(vaultpay_order_id=vaultpay_order_id).first()
         if not protected_order:
@@ -119,12 +133,27 @@ class PAProtectedOrderActionView(AdminAPIView):
                 dispatch_financial_command(protected_order)
                 apply_provider_command_result(protected_order, "ACCEPTED")
             elif action == "send-request":
+                if requires_owner_review(protected_order) and request.admin_role != ROLE_OWNER:
+                    return Response(
+                        {"error": "Orders of INR 5,000 or more require approval from an assigned owner."},
+                        status=403,
+                    )
                 schedule_aggregator_request(
                     protected_order,
                     request.data.get("decision"),
                     actor=getattr(request, "admin_user", None),
                 )
             elif action == "revoke-request":
+                if requires_owner_review(protected_order) and request.admin_role != ROLE_OWNER:
+                    approved_review = HighValueDecisionReview.objects.filter(
+                        protected_order=protected_order,
+                        status=HighValueDecisionReview.STATUS_APPROVED,
+                    ).order_by("-reviewed_at", "-id").first()
+                    if approved_review is None or approved_review.requested_by_id != request.admin_user.id:
+                        return Response(
+                            {"error": "Only the manager who requested this owner review can revoke the decision."},
+                            status=403,
+                        )
                 revoke_scheduled_aggregator_request(
                     protected_order,
                     actor=getattr(request, "admin_user", None),

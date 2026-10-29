@@ -89,6 +89,27 @@ def get_payment_status(provider_order_id):
     )
 
 
+def add_vendor(payload):
+    return _post_form(
+        getattr(settings, "OMNIWARE_ADD_VENDOR_ENDPOINT", "/v2/addvendor"),
+        payload,
+    )
+
+
+def modify_vendor(payload):
+    return _post_form(
+        getattr(settings, "OMNIWARE_MODIFY_VENDOR_ENDPOINT", "/v2/modifyvendor"),
+        payload,
+    )
+
+
+def get_vendor_status(vendor_code):
+    return _post_form(
+        getattr(settings, "OMNIWARE_VENDOR_STATUS_ENDPOINT", "/v2/vendorstatus"),
+        {"vendor_code": vendor_code},
+    )
+
+
 def create_refund(refund_request):
     payment_id = refund_request.provider_payment_id or refund_request.order.pa_payment_id
     if not payment_id:

@@ -1,9 +1,4 @@
-"""Fast, isolated settings for local automated tests.
-
-Normal development and production continue to use settings.py and PostgreSQL.
-"""
-
-from .settings import *  # noqa: F403
+from .settings import *  # noqa: F403,F401
 
 
 DATABASES = {
@@ -13,4 +8,10 @@ DATABASES = {
     }
 }
 
-EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "escrosafe-tests",
+    }
+}
+

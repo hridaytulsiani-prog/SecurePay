@@ -19,6 +19,7 @@ from .v1.create_merchant import (
     SendMerchantRegistrationOtp,
     VerifyMerchantRegistrationOtp,
 )
+from .v1.kyc import MerchantKYCView
 
 urlpatterns = [
     path("store/", TemplateView.as_view(template_name="merchant/static/index.html"), name="store"),
@@ -31,6 +32,7 @@ urlpatterns = [
     path('login/', LoginMerchant.as_view(), name='login_merchant'),
     path('session-status/', MerchantSessionStatus.as_view(), name='merchant_session_status'),
     path('courier-preferences/', MerchantCourierPreferences.as_view(), name='merchant_courier_preferences'),
+    path('kyc/', MerchantKYCView.as_view(), name='merchant_kyc'),
     path('issues/', MerchantIssues.as_view(), name='merchant_issues'),
     path('issues/<int:issue_id>/', MerchantIssueDetail.as_view(), name='merchant_issue_detail'),
     path('issues/<int:issue_id>/messages/', MerchantIssueMessages.as_view(), name='merchant_issue_messages'),

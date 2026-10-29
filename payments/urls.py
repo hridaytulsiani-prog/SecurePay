@@ -17,7 +17,7 @@ from payments.api.v1.generate_order import (
 from payments.api.v1.phonepe import PhonePeCallbackView, PhonePeInitiateView, PhonePeReturnView
 from payments.api.v1.payment_lifecycle import PaymentWebhookView, SettlementRunView
 from payments.api.v1.refunds import RefundRequestView, RefundWebhookView
-from payments.api.v1.checkout_sessions import CheckoutSessionDetailView, CheckoutSessionView
+from payments.api.v1.checkout_sessions import CheckoutSessionDetailView, CheckoutSessionTestOutcomeView, CheckoutSessionView
 from payments.api.v1.button_config import ButtonConfigView
 from payments.api.v1.omniware import (
     CheckoutSessionPaymentStatusView,
@@ -37,6 +37,7 @@ urlpatterns = [
     path('v1/orders/create/', CreateManualOrder.as_view(), name='manual-order-create'),
     path("v1/checkout-sessions/", CheckoutSessionView.as_view(), name="checkout-session-create"),
     path("v1/checkout-sessions/<str:session_id>/", CheckoutSessionDetailView.as_view(), name="checkout-session-detail"),
+    path("v1/checkout-sessions/<str:session_id>/test-outcome/", CheckoutSessionTestOutcomeView.as_view(), name="checkout-session-test-outcome"),
     path("v1/checkout-sessions/<str:session_id>/payment/", CheckoutSessionPaymentView.as_view(), name="checkout-session-payment"),
     path("v1/checkout-sessions/<str:session_id>/payment-status/", CheckoutSessionPaymentStatusView.as_view(), name="checkout-session-payment-status"),
     path("v1/button-config/", ButtonConfigView.as_view(), name="button-config"),
